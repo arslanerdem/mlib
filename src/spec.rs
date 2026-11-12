@@ -11,6 +11,7 @@ use std::collections::HashMap;
 /// Which columns are x's, y's, and roles — by name. One table can feed
 /// many specs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelSpec {
     pub x_columns: Vec<String>,
     pub y_columns: Vec<String>,
@@ -52,8 +53,8 @@ impl ModelSpec {
 /// A view, not a copy: borrows the table and carries the spec.
 #[derive(Debug)]
 pub struct ModelData<'a> {
-    pub table: &'a Table,
-    pub spec: ModelSpec,
+    pub(crate) table: &'a Table,
+    pub(crate) spec: ModelSpec,
 }
 
 impl<'a> ModelData<'a> {
@@ -93,18 +94,14 @@ impl<'a> ModelData<'a> {
         self.table.num_rows()
     }
 
-    /// Feature values for one row, in spec order. Categoricals give their
-    /// dictionary code; nulls and text give `NaN`. For a quick look only —
-    /// models read the encoded view.
-    pub fn x_row(&self, i: usize) -> Vec<f64> {
-        let value = |name: &String| self.checked_column(name).get_f64(i).unwrap_or(f64::NAN);
-        self.spec.x_columns.iter().map(value).collect()
+    /// The table this view reads from.
+    pub fn table(&self) -> &'a Table {
+        self.table
     }
 
-    /// Target values for one row, in spec order. Nulls give `NaN`.
-    pub fn y_row(&self, i: usize) -> Vec<f64> {
-        let value = |name: &String| self.checked_column(name).get_f64(i).unwrap_or(f64::NAN);
-        self.spec.y_columns.iter().map(value).collect()
+    /// Which columns play which role.
+    pub fn spec(&self) -> &ModelSpec {
+        &self.spec
     }
 
     /// The x columns as their own table, in spec order.

@@ -4,7 +4,6 @@
 
 use mlib::prelude::*;
 use mlib::random::Rng;
-use ndarray::Array2;
 use std::time::Instant;
 
 fn main() -> Result<(), Error> {
@@ -35,7 +34,7 @@ fn main() -> Result<(), Error> {
     let accuracy = model.score(&test)?;
     println!("predict:  {:>8.2?}  ({} rows)", start.elapsed(), test.num_rows());
 
-    let nodes: usize = model.trees.iter().map(|tree| tree.nodes.len()).sum();
+    let nodes: usize = model.trees().map(|tree| tree.n_nodes()).sum();
     println!("accuracy: {accuracy:.4}   nodes per tree: {}", nodes / n_trees);
     Ok(())
 }

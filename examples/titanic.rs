@@ -67,8 +67,8 @@ fn main() -> Result<(), Error> {
     let y_pred = fitted.predict_single(&test_table)?;
     println!("\ntest accuracy: {:.3}", accuracy(&y_true, &y_pred));
     println!("confusion matrix (rows = actual, columns = predicted):");
-    for row in confusion_matrix(&y_true, &y_pred, 2) {
-        println!("  {row:?}");
+    for row in confusion_matrix(&y_true, &y_pred, 2).rows() {
+        println!("  {row}");
     }
     println!("\nfeature importances:");
     for (name, importance) in fitted.feature_importances().unwrap_or_default() {

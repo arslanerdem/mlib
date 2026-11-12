@@ -1,7 +1,6 @@
 use mlib::prelude::*;
 use mlib::random::Rng;
 use mlib::testing::check_estimator;
-use ndarray::Array2;
 
 /// `n` rows, 5 uniform features in [0, 1). Only the first two matter.
 fn features(n: usize, seed: u64) -> Array2<f64> {
@@ -72,7 +71,7 @@ fn two_class_classifier_learns_a_non_linear_boundary() {
     assert!(probabilities.rows().into_iter().all(|row| (row.sum() - 1.0).abs() < 1e-9));
 
     // The two informative features carry nearly all the importance.
-    let importances = &model.feature_importances;
+    let importances = model.feature_importances();
     assert!((importances.iter().sum::<f64>() - 1.0).abs() < 1e-9);
     assert!(importances[0] + importances[1] > 0.8, "importances {importances:?}");
 }
@@ -85,8 +84,8 @@ fn several_classes_get_one_score_each_and_keep_their_labels() {
     test.y.mapv_inplace(|class| 10.0 * (class + 1.0));
 
     let model = GradientBoostingSpec::new().build().unwrap().fit(&train).unwrap();
-    assert_eq!(model.classes, [10.0, 20.0, 30.0]);
-    assert_eq!(model.trees.len(), 3);
+    assert_eq!(model.classes(), [10.0, 20.0, 30.0]);
+    assert_eq!((model.n_scores(), model.n_rounds()), (3, 100));
     let accuracy = model.score(&test).unwrap();
     assert!(accuracy > 0.95, "accuracy {accuracy}");
 

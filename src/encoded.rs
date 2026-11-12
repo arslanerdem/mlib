@@ -126,10 +126,11 @@ impl EncodedData {
         self.features.iter().map(Feature::display_name).collect()
     }
 
-    /// The first (usually the only) target, one value per row.
+    /// The target as a plain list, one value per row. Fails unless
+    /// there is exactly one target; with several, read `y` directly.
     pub fn target(&self) -> Result<Vec<f64>> {
-        if self.y.ncols() == 0 {
-            return Err(Error::shape("at least one target column", "no targets"));
+        if self.y.ncols() != 1 {
+            return Err(Error::shape("one target column", format!("{} targets", self.y.ncols())));
         }
         Ok(self.y.column(0).to_vec())
     }

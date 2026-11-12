@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// How many features each split may choose from.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MaxFeatures {
     All,
     Sqrt,
@@ -42,6 +43,7 @@ impl MaxFeatures {
 /// Random forest hyper-parameters. `RandomForestSpec::default()` trains
 /// a classifier out of the box.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RandomForestSpec {
     /// Default: classification.
     pub task: Task,
@@ -242,18 +244,54 @@ impl Estimator for ValidRandomForestSpec {
 /// A trained forest: learned state only, no reference to the training data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FittedRandomForest {
-    pub task: Task,
-    pub trees: Vec<Tree>,
-    /// The class labels, sorted. Empty for regression.
-    pub classes: Vec<Label>,
-    /// One per feature; sums to 1.
-    pub feature_importances: Vec<f64>,
-    /// The model-context features, aligned with `feature_importances`.
-    pub features: Vec<Feature>,
-    pub n_features: usize,
+    task: Task,
+    trees: Vec<Tree>,
+    classes: Vec<Label>,
+    feature_importances: Vec<f64>,
+    features: Vec<Feature>,
+    n_features: usize,
 }
 
 impl FittedRandomForest {
+    /// Whether this forest classifies or predicts numbers.
+    pub fn task(&self) -> Task {
+        self.task
+    }
+
+    pub fn n_trees(&self) -> usize {
+        self.trees.len()
+    }
+
+    /// Tree number `index`, for inspection. Panics if there is no such tree.
+    pub fn tree(&self, index: usize) -> &Tree {
+        &self.trees[index]
+    }
+
+    /// All the trees, in the order they were grown.
+    pub fn trees(&self) -> impl Iterator<Item = &Tree> {
+        self.trees.iter()
+    }
+
+    /// The class labels, sorted. Empty for regression.
+    pub fn classes(&self) -> &[Label] {
+        &self.classes
+    }
+
+    /// How much each feature contributed: one number per feature, summing
+    /// to 1, in the order of `features()`.
+    pub fn feature_importances(&self) -> &[f64] {
+        &self.feature_importances
+    }
+
+    /// The features the forest was fitted on.
+    pub fn features(&self) -> &[Feature] {
+        &self.features
+    }
+
+    pub fn n_features(&self) -> usize {
+        self.n_features
+    }
+
     /// For every row, the average of the trees' leaf predictions: class
     /// probabilities (classification) or the mean of each target (regression).
     fn average_tree_predictions(&self, data: &EncodedData) -> Result<Array2<f64>> {

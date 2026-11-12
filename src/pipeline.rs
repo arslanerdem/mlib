@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 /// An unfitted pipeline. `fit` leaves it untouched, so one pipeline can
 /// be fitted many times (once per cross-validation fold, for instance).
 pub struct Pipeline {
-    pub steps: Vec<Box<dyn Transformer>>,
-    pub model: Box<dyn AnyEstimator>,
+    steps: Vec<Box<dyn Transformer>>,
+    model: Box<dyn AnyEstimator>,
 }
 
 impl Clone for Pipeline {
@@ -59,15 +59,33 @@ impl Pipeline {
 /// This is the unit that gets saved and loaded.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FittedPipeline {
-    pub steps: Vec<Box<dyn Transformer>>,
-    pub model: Box<dyn Predictor>,
-    /// The x columns the pipeline was fitted on: names and types.
-    pub schema: Schema,
-    /// The model-context features, fixed at fit time.
-    pub features: Vec<Feature>,
+    steps: Vec<Box<dyn Transformer>>,
+    model: Box<dyn Predictor>,
+    schema: Schema,
+    features: Vec<Feature>,
 }
 
 impl FittedPipeline {
+    /// The fitted preprocessing steps, in the order they are applied.
+    pub fn steps(&self) -> &[Box<dyn Transformer>] {
+        &self.steps
+    }
+
+    /// The fitted model.
+    pub fn model(&self) -> &dyn Predictor {
+        self.model.as_ref()
+    }
+
+    /// The x columns the pipeline was fitted on: names and types.
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    /// The features the model sees, fixed at fit time.
+    pub fn features(&self) -> &[Feature] {
+        &self.features
+    }
+
     /// Predict for every row of a table: one row per table row, one
     /// column per target. The table must contain the x columns seen at
     /// fit time (extra columns are ignored); otherwise this fails with

@@ -61,9 +61,9 @@ fn row_order(n_rows: usize, shuffle: bool, seed: Option<u64>) -> Vec<usize> {
 /// count (cross-validation then reports the problem).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KFold {
-    pub n_splits: usize,
-    pub shuffle: bool,
-    pub seed: Option<u64>,
+    n_splits: usize,
+    shuffle: bool,
+    seed: Option<u64>,
 }
 
 impl KFold {
@@ -93,9 +93,9 @@ impl KFold {
 /// Stratified k-fold: every fold keeps the class proportions of `y`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StratifiedKFold {
-    pub n_splits: usize,
-    pub shuffle: bool,
-    pub seed: Option<u64>,
+    n_splits: usize,
+    shuffle: bool,
+    seed: Option<u64>,
 }
 
 impl StratifiedKFold {
@@ -130,7 +130,7 @@ impl StratifiedKFold {
 /// fold. Get the ids from `ModelData::groups()`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupKFold {
-    pub n_splits: usize,
+    n_splits: usize,
 }
 
 impl GroupKFold {
@@ -165,6 +165,7 @@ impl GroupKFold {
 /// Scores from cross-validation. Loss metrics (rmse, mse, mae, log_loss)
 /// are negated, so higher is always better.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct CrossValidationResult {
     /// One score per fold, in fold order. The mean alone hides the spread.
     pub scores: Vec<f64>,
@@ -249,7 +250,7 @@ pub fn cross_validate_pipeline(
             let test_table = data.table.take_rows(test);
             let fitted = pipe.fit(&ModelData::new(&train_table, data.spec.clone())?)?;
             let test_data = fitted.encode_with_targets(&ModelData::new(&test_table, data.spec.clone())?)?;
-            score_model(fitted.model.as_ref(), &test_data, scorer)
+            score_model(fitted.model(), &test_data, scorer)
         })
         .collect::<Result<Vec<f64>>>()?;
     Ok(CrossValidationResult::from_scores(scores))
@@ -263,6 +264,7 @@ pub type ParamGrid = HashMap<String, Vec<ParamValue>>;
 pub type Params = HashMap<String, ParamValue>;
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct GridSearchResult {
     pub best_params: Params,
     /// Mean cross-validated score of the best combination (higher is better).

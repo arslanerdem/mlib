@@ -42,21 +42,26 @@
 //!   two: a random forest ([`RandomForestSpec`]) and gradient boosting
 //!   ([`GradientBoostingSpec`]). Both do classification and regression.
 
-pub mod boosting;
-pub mod encoded;
-pub mod error;
-pub mod forest;
+mod boosting;
+mod encoded;
+mod error;
+mod forest;
 pub mod metrics;
 pub mod model_selection;
-pub mod persist;
-pub mod pipeline;
+mod persist;
+mod pipeline;
 pub mod preprocessing;
 pub mod random;
-pub mod spec;
-pub mod table;
+mod spec;
+mod table;
 pub mod testing;
-pub mod traits;
-pub mod tree;
+mod traits;
+mod tree;
+
+/// The matrix library mlib's API uses (`Array2` for predictions and
+/// encoded data). Use this re-export rather than adding `ndarray` to your
+/// own project, so the versions always match.
+pub use ndarray;
 
 pub use boosting::{FittedGradientBoosting, GradientBoostingSpec, ValidGradientBoostingSpec};
 pub use encoded::{EncodedData, Feature};
@@ -79,21 +84,23 @@ pub use preprocessing::{
 pub use spec::{ModelData, ModelSpec};
 pub use table::{Column, DataType, Schema, Table};
 pub use traits::{AnyEstimator, Estimator, Label, ParamValue, Predictor, Scorer, Transformer};
-pub use tree::{Task, Tree, TreeNode};
+pub use tree::{Node, Task, Tree};
 
 /// Everything a study needs: `use mlib::prelude::*;`
 ///
 /// `Result` is deliberately left out so that `Result<(), Error>` in your
 /// own `main` keeps its usual meaning.
 pub mod prelude {
+    pub use crate::ndarray::Array2;
     pub use crate::{
         accuracy, confusion_matrix, cross_validate, cross_validate_pipeline, f1_score, grid_search,
         grid_search_pipeline, load, log_loss, mean_absolute_error, mean_squared_error, r2_score,
         root_mean_squared_error, save, scorer, train_test_split, train_test_split_shuffled, AnyEstimator, Chain,
         Column, ColumnTransformer, CrossValidationResult, DataType, EncodedData, Error, Estimator, Feature,
-        FittedGradientBoosting, FittedPipeline, FittedRandomForest, Folds, GradientBoostingSpec, GridSearchResult, GroupKFold, HandleUnknown, ImputeStrategy, Imputer,
-        KFold, Label, MaxFeatures, ModelData, ModelSpec, OneHotEncoder, ParamGrid, ParamValue, Params, Pipeline,
-        Predictor, RandomForestSpec, Remainder, SavedModel, Scorer, StandardScaler, StratifiedKFold, Table, Task,
-        Transformer, ValidGradientBoostingSpec, ValidRandomForestSpec,
+        FittedGradientBoosting, FittedPipeline, FittedRandomForest, Folds, GradientBoostingSpec, GridSearchResult,
+        GroupKFold, HandleUnknown, ImputeStrategy, Imputer, KFold, Label, MaxFeatures, ModelData, ModelSpec, Node,
+        OneHotEncoder, ParamGrid, ParamValue, Params, Pipeline, Predictor, RandomForestSpec, Remainder, SavedModel,
+        Scorer, StandardScaler, StratifiedKFold, Table, Task, Transformer, Tree, ValidGradientBoostingSpec,
+        ValidRandomForestSpec,
     };
 }

@@ -10,12 +10,17 @@ use serde::{Deserialize, Serialize};
 /// `ColumnTransformer` branch.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Chain {
-    pub steps: Vec<Box<dyn Transformer>>,
+    pub(crate) steps: Vec<Box<dyn Transformer>>,
 }
 
 impl Chain {
     pub fn new(steps: Vec<Box<dyn Transformer>>) -> Chain {
         Chain { steps }
+    }
+
+    /// The steps, in the order they are applied.
+    pub fn steps(&self) -> &[Box<dyn Transformer>] {
+        &self.steps
     }
 }
 

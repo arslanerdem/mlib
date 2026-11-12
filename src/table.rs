@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DataType {
     Float,
     Int,
@@ -22,7 +23,7 @@ pub enum DataType {
 /// Column names and types, in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Schema {
-    pub fields: Vec<(String, DataType)>,
+    pub(crate) fields: Vec<(String, DataType)>,
 }
 
 impl Schema {
@@ -36,6 +37,11 @@ impl Schema {
         self.index_of(name).map(|i| self.fields[i].1)
     }
 
+    /// Every column's name and type, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, DataType)> {
+        self.fields.iter().map(|(name, data_type)| (name.as_str(), *data_type))
+    }
+
     /// Names of all columns, in order.
     pub fn names(&self) -> Vec<&str> {
         self.fields.iter().map(|(name, _)| name.as_str()).collect()
@@ -45,6 +51,7 @@ impl Schema {
 /// One typed column. A missing value is `None` — null is a property of
 /// the slot, never a sentinel like `NaN` or `"NA"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Column {
     Float(Vec<Option<f64>>),
     Int(Vec<Option<i64>>),
@@ -189,8 +196,8 @@ impl Column {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Table {
-    pub schema: Schema,
-    pub columns: Vec<Column>,
+    pub(crate) schema: Schema,
+    pub(crate) columns: Vec<Column>,
 }
 
 impl Table {
@@ -242,6 +249,11 @@ impl Table {
         }
         let columns = raw_columns.par_iter().map(|raw| parse_column(raw)).collect();
         Table::from_parts(names, columns)
+    }
+
+    /// The column names and types, in order.
+    pub fn schema(&self) -> &Schema {
+        &self.schema
     }
 
     /// Number of rows. All columns have this length.

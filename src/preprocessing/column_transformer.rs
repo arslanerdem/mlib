@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// What happens to columns no branch asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Remainder {
     /// Append them unchanged, in table order.
     Passthrough,
@@ -16,22 +17,18 @@ pub enum Remainder {
 }
 
 /// Sends named column subsets through different branches and joins the
-/// results side by side, in branch order. Each branch is
-/// `(name, transformer, columns)`.
+/// results side by side, in branch order.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ColumnTransformer {
-    pub branches: Vec<(String, Box<dyn Transformer>, Vec<String>)>,
-    pub remainder: Remainder,
+    /// (branch name, step, the columns routed to it)
+    branches: Vec<(String, Box<dyn Transformer>, Vec<String>)>,
+    remainder: Remainder,
 }
 
 impl ColumnTransformer {
-    pub fn new(branches: Vec<(String, Box<dyn Transformer>, Vec<String>)>) -> ColumnTransformer {
-        ColumnTransformer { branches, remainder: Remainder::Drop }
-    }
-
     /// A transformer with no branches yet; add them with `with_branch`.
     pub fn empty() -> ColumnTransformer {
-        ColumnTransformer::new(Vec::new())
+        ColumnTransformer { branches: Vec::new(), remainder: Remainder::Drop }
     }
 
     /// Add a branch: send the named columns through `step`.

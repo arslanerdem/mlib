@@ -14,13 +14,19 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct StandardScaler {
     /// Learned at fit: (mean, std) per numeric column, by name.
-    pub stats: BTreeMap<String, (f64, f64)>,
-    pub fitted: bool,
+    stats: BTreeMap<String, (f64, f64)>,
+    fitted: bool,
 }
 
 impl StandardScaler {
     pub fn new() -> StandardScaler {
         StandardScaler::default()
+    }
+
+    /// The (mean, standard deviation) learnt for each column at fit time.
+    /// Empty before `fit`.
+    pub fn stats(&self) -> &BTreeMap<String, (f64, f64)> {
+        &self.stats
     }
 }
 

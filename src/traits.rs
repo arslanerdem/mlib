@@ -23,6 +23,7 @@ pub type Label = f64;
 
 /// A hyper-parameter value set by name (grid search).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ParamValue {
     Int(i64),
     Float(f64),
@@ -66,11 +67,18 @@ pub trait Estimator {
 }
 
 /// A type-erased estimator: the form a `Pipeline` holds. Every `Clone`
-/// estimator gets this automatically — implement `Estimator`, never this.
-pub trait AnyEstimator {
+/// estimator gets this automatically — implement `Estimator`, never this
+/// (the compiler will not let you).
+pub trait AnyEstimator: sealed::Sealed {
     fn fit_boxed(&self, data: &EncodedData) -> Result<Box<dyn Predictor>>;
     fn set_param(&mut self, name: &str, value: &ParamValue) -> Result<()>;
     fn clone_box(&self) -> Box<dyn AnyEstimator>;
+}
+
+mod sealed {
+    /// Only this crate can implement `AnyEstimator`.
+    pub trait Sealed {}
+    impl<T: super::Estimator + Clone + 'static> Sealed for T where T::Fitted: 'static {}
 }
 
 impl<T> AnyEstimator for T
@@ -120,7 +128,7 @@ pub trait Predictor: Debug {
 }
 
 /// The only column of a one-target prediction matrix, as a plain list.
-pub fn single_column(predictions: Array2<f64>) -> Result<Vec<Label>> {
+pub(crate) fn single_column(predictions: Array2<f64>) -> Result<Vec<Label>> {
     if predictions.ncols() != 1 {
         return Err(Error::shape("predictions for one target", format!("{} targets", predictions.ncols())));
     }

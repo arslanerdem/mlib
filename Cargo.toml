@@ -1,7 +1,9 @@
 [package]
 name = "mlib"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
+# Declared, not yet verified: the code has only been built on 1.91. CI must confirm it.
+rust-version = "1.85"
 authors = ["Erdem Arslan"]
 description = "Fast, readable machine learning for tabular data: tables, pipelines, random forests, gradient boosting."
 license = "MIT"
@@ -13,8 +15,8 @@ categories = ["science", "algorithms"]
 exclude = ["mlib-docs/", "compare/", "CLAUDE.md", "examples/compare.rs"]
 
 [dependencies]
-# Pinned exactly: ndarray version skew across crates is a recurring source of errors.
-ndarray = "=0.16.1"
+# Re-exported as `mlib::ndarray`, so users never choose a version themselves.
+ndarray = "0.16"
 rayon = "1.10"
 csv = "1.3"
 serde = { version = "1", features = ["derive"] }

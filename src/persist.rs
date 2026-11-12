@@ -50,7 +50,7 @@ pub fn save(pipeline: &FittedPipeline, spec: &ModelSpec, path: &str) -> Result<(
         format_version: FORMAT_VERSION,
         library_version: env!("CARGO_PKG_VERSION"),
         spec,
-        schema: &pipeline.schema,
+        schema: pipeline.schema(),
         fitted: pipeline,
     };
     let mut writer = BufWriter::new(File::create(path)?);

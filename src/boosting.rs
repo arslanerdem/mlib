@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 /// Gradient boosting hyper-parameters. `GradientBoostingSpec::default()`
 /// trains a classifier out of the box.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct GradientBoostingSpec {
     /// Default: classification.
     pub task: Task,
@@ -314,24 +315,73 @@ fn by_row(columns: &[Vec<f64>]) -> Array2<f64> {
 /// training data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FittedGradientBoosting {
-    pub task: Task,
+    task: Task,
     /// `trees[s]` are the trees that build up score `s`, in the order
     /// they were grown. The learning rate is already folded into their
     /// leaf values. Regression has one score per target; classification
     /// has one score for two classes, and one per class otherwise.
-    pub trees: Vec<Vec<Tree>>,
-    /// The score every row starts from, one per score.
-    pub initial_scores: Vec<f64>,
-    /// The class labels, sorted. Empty for regression.
-    pub classes: Vec<Label>,
-    /// One per feature; sums to 1.
-    pub feature_importances: Vec<f64>,
-    /// The model-context features, aligned with `feature_importances`.
-    pub features: Vec<Feature>,
-    pub n_features: usize,
+    trees: Vec<Vec<Tree>>,
+    initial_scores: Vec<f64>,
+    classes: Vec<Label>,
+    feature_importances: Vec<f64>,
+    features: Vec<Feature>,
+    n_features: usize,
 }
 
 impl FittedGradientBoosting {
+    /// Whether this model classifies or predicts numbers.
+    pub fn task(&self) -> Task {
+        self.task
+    }
+
+    /// How many scores the model keeps: one per regression target, one
+    /// for two classes, one per class otherwise.
+    pub fn n_scores(&self) -> usize {
+        self.trees.len()
+    }
+
+    /// How many rounds were run. Each round grew one tree per score.
+    pub fn n_rounds(&self) -> usize {
+        self.trees[0].len()
+    }
+
+    /// The tree grown for score `score` in round `round`, for inspection.
+    /// Its leaf values already include the learning rate. Panics if
+    /// there is no such tree.
+    pub fn tree(&self, score: usize, round: usize) -> &Tree {
+        &self.trees[score][round]
+    }
+
+    /// All the trees: every round of the first score, then the next score.
+    pub fn trees(&self) -> impl Iterator<Item = &Tree> {
+        self.trees.iter().flatten()
+    }
+
+    /// The score every row starts from, one per score.
+    pub fn initial_scores(&self) -> &[f64] {
+        &self.initial_scores
+    }
+
+    /// The class labels, sorted. Empty for regression.
+    pub fn classes(&self) -> &[Label] {
+        &self.classes
+    }
+
+    /// How much each feature contributed: one number per feature, summing
+    /// to 1, in the order of `features()`.
+    pub fn feature_importances(&self) -> &[f64] {
+        &self.feature_importances
+    }
+
+    /// The features the model was fitted on.
+    pub fn features(&self) -> &[Feature] {
+        &self.features
+    }
+
+    pub fn n_features(&self) -> usize {
+        self.n_features
+    }
+
     /// The scores for every row, `[score][row]`: the starting score plus
     /// every tree's correction.
     fn scores(&self, data: &EncodedData) -> Result<Vec<Vec<f64>>> {

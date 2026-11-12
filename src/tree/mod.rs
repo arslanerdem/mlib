@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// What a model predicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Task {
     /// Predict a class. The target's distinct values are the classes.
     Classification,
@@ -32,20 +33,34 @@ pub enum Task {
 /// one array instead of one allocation per leaf.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tree {
-    pub nodes: Vec<TreeNode>,
+    pub(crate) nodes: Vec<TreeNode>,
     /// Every leaf's prediction, one leaf after another, `n_outputs`
     /// numbers each: class probabilities (classification) or the mean
     /// target (regression).
-    pub leaf_values: Vec<f64>,
+    pub(crate) leaf_values: Vec<f64>,
     /// How many numbers one leaf predicts.
-    pub n_outputs: usize,
+    pub(crate) n_outputs: usize,
+}
+
+/// One node of a tree, as [`Tree::node`] describes it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node<'a> {
+    /// Rows whose `feature` value is at most `threshold` continue at node
+    /// `left`; the rest continue at node `right`.
+    Split { feature: usize, threshold: f64, left: usize, right: usize },
+    /// The end of a path: class probabilities (classification) or the
+    /// mean of each target (regression).
+    Leaf { prediction: &'a [f64] },
 }
 
 /// Marks a leaf in `TreeNode::feature`.
-pub const LEAF: u32 = u32::MAX;
+pub(crate) const LEAF: u32 = u32::MAX;
 
+/// How a node is stored. Kept small (16 bytes) because prediction speed
+/// depends on how many nodes fit in the CPU cache; [`Node`] is the
+/// readable form.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeNode {
+pub(crate) struct TreeNode {
     /// Rows with `value <= threshold` go left, the rest go right.
     pub threshold: f64,
     /// Feature index to split on, or `LEAF`.
@@ -58,7 +73,7 @@ pub struct TreeNode {
 }
 
 impl TreeNode {
-    pub fn is_leaf(&self) -> bool {
+    pub(crate) fn is_leaf(&self) -> bool {
         self.feature == LEAF
     }
 
@@ -74,8 +89,43 @@ impl TreeNode {
 const ROWS_IN_STEP: usize = 8;
 
 impl Tree {
+    /// How many nodes the tree has, splits and leaves together.
+    pub fn n_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// How many leaves the tree has.
+    pub fn n_leaves(&self) -> usize {
+        self.leaf_values.len() / self.n_outputs
+    }
+
+    /// The number of splits on the longest path from the root to a leaf.
+    /// A tree that is a single leaf has depth 0.
+    pub fn depth(&self) -> usize {
+        let mut deepest = 0;
+        let mut to_visit = vec![(0, 0)];
+        while let Some((index, depth)) = to_visit.pop() {
+            deepest = deepest.max(depth);
+            if let Node::Split { left, right, .. } = self.node(index) {
+                to_visit.extend([(left, depth + 1), (right, depth + 1)]);
+            }
+        }
+        deepest
+    }
+
+    /// Node number `index`, in readable form. Node 0 is the root. Panics
+    /// if there is no such node.
+    pub fn node(&self, index: usize) -> Node<'_> {
+        let node = &self.nodes[index];
+        if node.is_leaf() {
+            return Node::Leaf { prediction: self.leaf_prediction(node) };
+        }
+        let left = node.left_or_leaf as usize;
+        Node::Split { feature: node.feature as usize, threshold: node.threshold, left, right: left + 1 }
+    }
+
     /// The prediction stored in a leaf node.
-    pub fn leaf_prediction(&self, leaf: &TreeNode) -> &[f64] {
+    pub(crate) fn leaf_prediction(&self, leaf: &TreeNode) -> &[f64] {
         &self.leaf_values[leaf.left_or_leaf as usize * self.n_outputs..][..self.n_outputs]
     }
 
@@ -98,7 +148,7 @@ impl Tree {
     /// Each step of a walk waits on memory for the next node; with several
     /// walks in flight the CPU fetches their nodes at the same time instead
     /// of one after another, which makes prediction two to three times faster.
-    pub fn add_predictions(&self, rows: &[f64], n_features: usize, totals: &mut [f64]) {
+    pub(crate) fn add_predictions(&self, rows: &[f64], n_features: usize, totals: &mut [f64]) {
         let row_groups = rows.chunks(n_features * ROWS_IN_STEP);
         let total_groups = totals.chunks_mut(self.n_outputs * ROWS_IN_STEP);
         for (rows, totals) in row_groups.zip(total_groups) {

@@ -92,13 +92,13 @@ pub fn mean_over_targets(
     Ok(total / y_true.ncols() as f64)
 }
 
-/// Counts of (actual, predicted) pairs: rows are actual classes, columns
-/// predicted. Labels must be class indices `0..n_classes`.
-pub fn confusion_matrix(y_true: &[f64], y_pred: &[f64], n_classes: usize) -> Vec<Vec<usize>> {
+/// Counts of (actual, predicted) pairs as a matrix: rows are actual
+/// classes, columns predicted. Labels must be class indices `0..n_classes`.
+pub fn confusion_matrix(y_true: &[f64], y_pred: &[f64], n_classes: usize) -> Array2<usize> {
     check_lengths(y_true, y_pred.len());
-    let mut matrix = vec![vec![0; n_classes]; n_classes];
+    let mut matrix = Array2::zeros((n_classes, n_classes));
     for (truth, prediction) in y_true.iter().zip(y_pred) {
-        matrix[*truth as usize][*prediction as usize] += 1;
+        matrix[[*truth as usize, *prediction as usize]] += 1;
     }
     matrix
 }

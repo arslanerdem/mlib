@@ -1,7 +1,6 @@
 use mlib::prelude::*;
 use mlib::random::Rng;
 use mlib::testing::check_estimator;
-use ndarray::Array2;
 
 /// `n` rows, 5 uniform features in [0, 1). Only the first two matter.
 fn features(n: usize, seed: u64) -> Array2<f64> {
@@ -54,7 +53,7 @@ fn classifier_learns_a_non_linear_boundary() {
     assert!(probabilities.rows().into_iter().all(|row| (row.sum() - 1.0).abs() < 1e-9));
 
     // The two informative features carry nearly all the importance.
-    let importances = &model.feature_importances;
+    let importances = model.feature_importances();
     assert!((importances.iter().sum::<f64>() - 1.0).abs() < 1e-9);
     assert!(importances[0] + importances[1] > 0.8, "importances {importances:?}");
 }
@@ -64,7 +63,7 @@ fn classes_keep_their_original_labels() {
     let mut data = classification(500, 3);
     data.y.mapv_inplace(|class| if class == 1.0 { 9.0 } else { -4.0 });
     let model = RandomForestSpec::new().n_trees(20).build().unwrap().fit(&data).unwrap();
-    assert_eq!(model.classes, [-4.0, 9.0]);
+    assert_eq!(model.classes(), [-4.0, 9.0]);
     assert!(model.predict(&data).unwrap().iter().all(|label| *label == 9.0 || *label == -4.0));
 }
 
@@ -93,11 +92,11 @@ fn same_seed_gives_a_byte_identical_model() {
 fn depth_and_leaf_size_limits_are_respected() {
     let data = classification(1000, 1);
     let stump = RandomForestSpec::new().n_trees(5).max_depth(Some(1)).build().unwrap().fit(&data).unwrap();
-    assert!(stump.trees.iter().all(|tree| tree.nodes.len() <= 3));
+    assert!(stump.trees().all(|tree| tree.n_nodes() <= 3 && tree.depth() <= 1));
 
     let unlimited = RandomForestSpec::new().n_trees(5).build().unwrap().fit(&data).unwrap();
     let coarse = RandomForestSpec::new().n_trees(5).min_samples_leaf(50).build().unwrap().fit(&data).unwrap();
-    assert!(coarse.trees[0].nodes.len() < unlimited.trees[0].nodes.len() / 4);
+    assert!(coarse.tree(0).n_nodes() < unlimited.tree(0).n_nodes() / 4);
 }
 
 #[test]
@@ -165,12 +164,12 @@ fn batch_prediction_matches_walking_each_row_alone() {
     for (row, probabilities) in test.x.rows().into_iter().zip(batch.rows()) {
         let row = row.to_vec();
         let mut expected = vec![0.0; 2];
-        for tree in &model.trees {
+        for tree in model.trees() {
             for (total, value) in expected.iter_mut().zip(tree.predict_row(&row)) {
                 *total += value;
             }
         }
-        let scale = 1.0 / model.trees.len() as f64;
+        let scale = 1.0 / model.n_trees() as f64;
         expected.iter_mut().for_each(|total| *total *= scale);
         assert_eq!(probabilities.to_vec(), expected);
     }
@@ -214,4 +213,30 @@ fn a_classifier_takes_one_target_only() {
     let mut data = classification(200, 1);
     data.y = Array2::zeros((200, 2));
     assert!(RandomForestSpec::new().build().unwrap().fit(&data).is_err());
+}
+
+#[test]
+fn a_fitted_tree_can_be_read_node_by_node() {
+    let data = classification(1000, 1);
+    let model = RandomForestSpec::new().n_trees(3).max_depth(Some(2)).build().unwrap().fit(&data).unwrap();
+    assert_eq!(model.n_trees(), 3);
+
+    let tree = model.tree(0);
+    assert!(tree.depth() <= 2);
+    assert_eq!(tree.n_nodes(), 2 * tree.n_leaves() - 1); // every split has exactly two children
+
+    // Follow one row by hand from the root; it must end where the tree says.
+    let row = data.x.row(0).to_vec();
+    let mut index = 0;
+    let by_hand = loop {
+        match tree.node(index) {
+            Node::Split { feature, threshold, left, right } => {
+                assert!(feature < 5);
+                index = if row[feature] <= threshold { left } else { right };
+            }
+            Node::Leaf { prediction } => break prediction,
+        }
+    };
+    assert_eq!(by_hand, tree.predict_row(&row));
+    assert!((by_hand.iter().sum::<f64>() - 1.0).abs() < 1e-9); // class probabilities
 }

@@ -33,7 +33,7 @@ fn imputer_strategies() {
     let column = |strategy| {
         let mut imputer = Imputer::new(strategy);
         imputer.fit(&table()).unwrap();
-        imputer.fill_values["rooms"]
+        imputer.fill_values()["rooms"]
     };
     assert_eq!(column(ImputeStrategy::Mean), 5.0 / 3.0);
     assert_eq!(column(ImputeStrategy::MostFrequent), 1.0);
@@ -75,13 +75,13 @@ fn one_hot_encodes_unseen_categories_as_all_zeros() {
     let train = table().select(&["city"]).unwrap();
     let mut encoder = OneHotEncoder::new();
     let out = encoder.fit_transform(&train).unwrap();
-    assert_eq!(out.schema.names(), ["city=Oslo", "city=Paris", "city=Rome"]);
+    assert_eq!(out.schema().names(), ["city=Oslo", "city=Paris", "city=Rome"]);
     assert_eq!(out.column("city=Paris").unwrap(), &Column::floats(&[1.0, 0.0, 1.0, 0.0]));
 
     let new = Table::new(vec![("city", Column::Text(vec![Some("Tokyo".into()), None, Some("Rome".into())]))])
         .unwrap();
     let encoded = encoder.transform(&new).unwrap();
-    assert_eq!(encoded.schema.names(), out.schema.names());
+    assert_eq!(encoded.schema().names(), out.schema().names());
     assert_eq!(encoded.column("city=Oslo").unwrap(), &Column::floats(&[0.0, 0.0, 0.0]));
     assert_eq!(encoded.column("city=Rome").unwrap(), &Column::floats(&[0.0, 0.0, 1.0]));
 
@@ -97,7 +97,7 @@ fn one_hot_encodes_unseen_categories_as_all_zeros() {
 fn one_hot_treats_int_and_categorical_columns_as_categories() {
     let table = Table::new(vec![("class", Column::ints(&[3, 1, 10, 1]))]).unwrap();
     let out = OneHotEncoder::new().fit_transform(&table).unwrap();
-    assert_eq!(out.schema.names(), ["class=1", "class=3", "class=10"]);
+    assert_eq!(out.schema().names(), ["class=1", "class=3", "class=10"]);
 
     // A dictionary-encoded column encodes the same as its text form.
     let text = table_city();
@@ -121,7 +121,7 @@ fn column_transformer_routes_columns_and_tracks_features() {
         )
         .with_branch("cat", OneHotEncoder::new(), &["city"]);
     let out = pre.fit_transform(&table()).unwrap();
-    assert_eq!(out.schema.names(), ["age", "city=Oslo", "city=Paris", "city=Rome"]);
+    assert_eq!(out.schema().names(), ["age", "city=Oslo", "city=Paris", "city=Rome"]);
 
     let input = [Feature::numeric("age"), Feature::numeric("rooms"), Feature::numeric("city")];
     let features = pre.output_columns(&input).unwrap();
@@ -132,7 +132,7 @@ fn column_transformer_routes_columns_and_tracks_features() {
     // Passthrough appends the unrouted columns.
     let mut keep_rest = pre.clone().with_remainder(Remainder::Passthrough);
     let out = keep_rest.fit_transform(&table()).unwrap();
-    assert_eq!(out.schema.names().last(), Some(&"rooms"));
+    assert_eq!(out.schema().names().last(), Some(&"rooms"));
     assert_eq!(keep_rest.output_columns(&input).unwrap().len(), 5);
 
     // A missing routed column is a schema mismatch.

@@ -2,7 +2,7 @@
 
 Machine learning for tabular data in Rust: fast, and written to be read.
 
-> **Early development.** This is version 0.0.1: it works and is tested,
+> **Early development.** This is version 0.0.2: it works and is tested,
 > but the API will change before 0.1.0.
 
 ```rust
@@ -45,7 +45,19 @@ let predictions = fitted.predict(&table)?;         // rows × 2 matrix
 let latitude = predictions.column(0);
 ```
 
-With a single target, `predict_single` returns a plain list.
+With a single target, `predict_single` returns a plain list. Matrices
+are `ndarray` arrays; use `mlib::ndarray` rather than adding the crate
+yourself, so the versions always match.
+
+A fitted model can be read, not just used:
+
+```rust
+let tree = forest.tree(0);
+println!("{} nodes, depth {}", tree.n_nodes(), tree.depth());
+if let Node::Split { feature, threshold, .. } = tree.node(0) {
+    println!("the first question: is feature {feature} <= {threshold}?");
+}
+```
 
 ## Try it
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ImputeStrategy {
     Mean,
     Median,
@@ -55,15 +56,20 @@ impl ImputeStrategy {
 /// encoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Imputer {
-    pub strategy: ImputeStrategy,
+    strategy: ImputeStrategy,
     /// Learned at fit: one fill value per numeric column, by name.
-    pub fill_values: BTreeMap<String, f64>,
-    pub fitted: bool,
+    fill_values: BTreeMap<String, f64>,
+    fitted: bool,
 }
 
 impl Imputer {
     pub fn new(strategy: ImputeStrategy) -> Imputer {
         Imputer { strategy, fill_values: BTreeMap::new(), fitted: false }
+    }
+
+    /// The value learnt for each column at fit time. Empty before `fit`.
+    pub fn fill_values(&self) -> &BTreeMap<String, f64> {
+        &self.fill_values
     }
 }
 

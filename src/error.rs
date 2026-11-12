@@ -7,6 +7,7 @@ use std::fmt;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// A named column does not exist in the table's schema.
     ColumnNotFound(String),
@@ -36,8 +37,11 @@ pub enum Error {
 
     /// I/O and serialisation errors, wrapped.
     Io(std::io::Error),
-    Csv(csv::Error),
-    Json(serde_json::Error),
+    /// A CSV file could not be read. The underlying error is kept as
+    /// this error's `source()`.
+    Csv(Box<dyn std::error::Error + Send + Sync>),
+    /// A saved model could not be written or read.
+    Json(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl Error {
@@ -75,8 +79,8 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Io(e) => Some(e),
-            Error::Csv(e) => Some(e),
-            Error::Json(e) => Some(e),
+            Error::Csv(e) => Some(e.as_ref()),
+            Error::Json(e) => Some(e.as_ref()),
             _ => None,
         }
     }
@@ -90,12 +94,12 @@ impl From<std::io::Error> for Error {
 
 impl From<csv::Error> for Error {
     fn from(e: csv::Error) -> Error {
-        Error::Csv(e)
+        Error::Csv(Box::new(e))
     }
 }
 
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Error {
-        Error::Json(e)
+        Error::Json(Box::new(e))
     }
 }

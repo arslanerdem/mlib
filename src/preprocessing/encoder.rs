@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// What to do with a category at transform time that was not seen at fit.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum HandleUnknown {
     /// Encode as all-zeros across the column's one-hot features.
     #[default]
@@ -27,10 +28,10 @@ pub enum HandleUnknown {
 /// output columns are always the same.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct OneHotEncoder {
-    pub handle_unknown: HandleUnknown,
+    handle_unknown: HandleUnknown,
     /// Learned at fit: the sorted category list per encoded column, by name.
-    pub categories: BTreeMap<String, Vec<String>>,
-    pub fitted: bool,
+    categories: BTreeMap<String, Vec<String>>,
+    fitted: bool,
 }
 
 impl OneHotEncoder {
@@ -41,6 +42,12 @@ impl OneHotEncoder {
     pub fn with_handle_unknown(mut self, handle_unknown: HandleUnknown) -> OneHotEncoder {
         self.handle_unknown = handle_unknown;
         self
+    }
+
+    /// The categories learnt for each encoded column at fit time, sorted.
+    /// Empty before `fit`.
+    pub fn categories(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.categories
     }
 }
 

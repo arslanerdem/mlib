@@ -33,9 +33,9 @@ fn fit_predict_and_score_end_to_end() {
     let data = ModelData::new(&table, spec()).unwrap();
     let fitted = pipeline().fit(&data).unwrap();
 
-    let names: Vec<String> = fitted.features.iter().map(Feature::display_name).collect();
+    let names: Vec<String> = fitted.features().iter().map(Feature::display_name).collect();
     assert_eq!(names, ["age", "fare", "sex=female", "sex=male", "port=C", "port=Q", "port=S"]);
-    assert_eq!(fitted.schema.names(), ["sex", "age", "port", "fare"]);
+    assert_eq!(fitted.schema().names(), ["sex", "age", "port", "fare"]);
     assert!(fitted.score(&data).unwrap() > 0.9);
     assert_eq!(fitted.predict(&table).unwrap().dim(), (120, 1));
     assert_eq!(fitted.predict_single(&table).unwrap().len(), 120);
@@ -91,7 +91,7 @@ fn save_and_load_round_trip_predicts_identically() {
     save(&fitted, &spec(), path).unwrap();
     let saved = load(path).unwrap();
     assert_eq!(saved.spec, spec());
-    assert_eq!(saved.schema, fitted.schema);
+    assert_eq!(&saved.schema, fitted.schema());
     assert_eq!(saved.fitted.predict_proba(&table).unwrap(), fitted.predict_proba(&table).unwrap());
 
     // Same pipeline, same data → byte-identical file.
@@ -200,4 +200,18 @@ fn a_pipeline_predicts_two_targets_together() {
     save(&fitted, &spec, path).unwrap();
     assert_eq!(load(path).unwrap().fitted.predict(&table).unwrap(), predictions);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn a_plain_target_list_needs_exactly_one_target() {
+    let x = Array2::zeros((4, 2));
+    assert!(EncodedData::new(x.clone(), Array2::zeros((4, 1))).unwrap().target().is_ok());
+    assert!(EncodedData::new(x.clone(), Array2::zeros((4, 2))).unwrap().target().is_err());
+    assert!(EncodedData::new(x, Array2::zeros((4, 0))).unwrap().target().is_err());
+}
+
+#[test]
+fn the_confusion_matrix_counts_actual_against_predicted() {
+    let matrix = confusion_matrix(&[0.0, 0.0, 1.0, 1.0, 1.0], &[0.0, 1.0, 1.0, 1.0, 0.0], 2);
+    assert_eq!(matrix, mlib::ndarray::array![[1, 1], [1, 2]]);
 }

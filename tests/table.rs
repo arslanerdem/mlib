@@ -15,7 +15,7 @@ fn table() -> Table {
 #[test]
 fn csv_types_are_inferred_narrowest_first() {
     let table = table();
-    let types: Vec<DataType> = table.schema.fields.iter().map(|(_, dtype)| *dtype).collect();
+    let types: Vec<DataType> = table.schema().iter().map(|(_, data_type)| data_type).collect();
     assert_eq!(types, [DataType::Int, DataType::Int, DataType::Float, DataType::Bool, DataType::Text]);
     assert_eq!(table.num_rows(), 4);
     assert_eq!(table.num_columns(), 5);
@@ -40,7 +40,7 @@ fn ragged_rows_fail_to_load() {
 fn select_and_take_rows_keep_the_requested_order() {
     let table = table();
     let picked = table.select(&["city", "id"]).unwrap();
-    assert_eq!(picked.schema.names(), ["city", "id"]);
+    assert_eq!(picked.schema().names(), ["city", "id"]);
     assert!(matches!(table.select(&["nope"]), Err(Error::ColumnNotFound(_))));
 
     let rows = table.take_rows(&[3, 0]);
@@ -57,7 +57,7 @@ fn drop_nulls_removes_only_rows_missing_the_named_columns() {
 #[test]
 fn with_categorical_dictionary_encodes_with_sorted_categories() {
     let table = table().with_categorical(&["city"]).unwrap();
-    assert_eq!(table.schema.get("city"), Some(DataType::Categorical));
+    assert_eq!(table.schema().get("city"), Some(DataType::Categorical));
     let Column::Categorical { codes, categories } = table.column("city").unwrap() else { panic!() };
     assert_eq!(categories, &["Oslo", "Paris"]);
     assert_eq!(codes, &[Some(1), Some(0), None, Some(1)]);
