@@ -55,6 +55,11 @@ const PARALLEL_WORK: usize = 60_000;
 /// A node with at least this many samples is rearranged in parallel.
 const PARALLEL_PARTITION: usize = 50_000;
 
+/// A node with at least this many samples keeps its histograms so that
+/// its children can reuse them (see `TreeBuilder::child_histograms`).
+/// Below this, filling a fresh histogram is cheaper than keeping one.
+const KEEP_HISTOGRAMS: usize = 1024;
+
 /// A node waiting to be built: it owns `samples[start..end]`.
 struct PendingNode {
     index: usize,
@@ -66,6 +71,10 @@ struct PendingNode {
     /// The first `n_constant` entries of `feature_order` are features
     /// already known to have a single value across this node's samples.
     n_constant: usize,
+    /// One filled histogram per feature (indexed by feature), when they
+    /// were prepared ahead; only the features not known to be constant
+    /// are filled. `None` means: fill them when the node is examined.
+    histograms: Option<Vec<Histogram>>,
 }
 
 struct Split {
@@ -93,6 +102,9 @@ struct TreeBuilder<'a> {
     leaf_values: Vec<f64>,
     importances: Vec<f64>,
     histogram: Histogram,
+    /// Emptied histogram sets waiting to be reused, so that large nodes
+    /// do not allocate new ones.
+    spare_histograms: Vec<Vec<Histogram>>,
     /// All feature indices, reordered as the tree grows. A feature with a
     /// single value across a node's samples cannot split that node or any
     /// node below it, so such features are moved to the front and each
@@ -141,6 +153,7 @@ impl<'a> TreeBuilder<'a> {
             leaf_values: Vec::new(),
             importances: vec![0.0; binned.n_features()],
             histogram: Histogram::new(targets.n_channels()),
+            spare_histograms: Vec::new(),
             feature_order: (0..binned.n_features()).collect(),
         }
     }
@@ -156,15 +169,13 @@ impl<'a> TreeBuilder<'a> {
             depth: 0,
             totals: self.targets.totals(&self.samples),
             n_constant: 0,
+            histograms: None,
         };
         let mut pending = vec![root];
 
-        while let Some(node) = pending.pop() {
-            let depth_allows = self.params.max_depth.is_none_or(|max_depth| node.depth < max_depth);
-            let enough_samples = node.totals.count >= 2.0 * self.params.min_samples_leaf as f64;
-
-            let (split, n_constant) = if depth_allows && enough_samples && !self.is_pure(&node) {
-                self.best_split(&node)
+        while let Some(mut node) = pending.pop() {
+            let (split, n_constant) = if self.may_split(node.depth, &node.totals) && !self.is_pure(&node) {
+                self.best_split(&mut node)
             } else {
                 (None, node.n_constant)
             };
@@ -172,6 +183,9 @@ impl<'a> TreeBuilder<'a> {
                 let leaf_number = self.leaf_values.len() / self.targets.n_channels();
                 self.leaf_values.extend(self.targets.leaf_prediction(&node.totals));
                 self.nodes[node.index] = TreeNode { threshold: 0.0, feature: LEAF, left_or_leaf: leaf_number as u32 };
+                if let Some(histograms) = node.histograms.take() {
+                    self.recycle(histograms);
+                }
                 continue;
             };
 
@@ -186,26 +200,102 @@ impl<'a> TreeBuilder<'a> {
                 feature: split.feature as u32,
                 left_or_leaf: left as u32,
             };
-            let depth = node.depth + 1;
             // Add up one side; the other is what remains of the node's totals.
             let left_totals = self.targets.totals(&self.samples[node.start..middle]);
             let right_totals = node.totals.without(&left_totals);
-            pending.push(PendingNode {
-                index: left + 1,
-                start: middle,
-                end: node.end,
-                depth,
-                totals: right_totals,
-                n_constant,
-            });
-            pending.push(PendingNode {
+            let depth = node.depth + 1;
+            let mut left_node = PendingNode {
                 index: left,
                 start: node.start,
                 end: middle,
                 depth,
                 totals: left_totals,
                 n_constant,
-            });
+                histograms: None,
+            };
+            let mut right_node = PendingNode {
+                index: left + 1,
+                start: middle,
+                end: node.end,
+                depth,
+                totals: right_totals,
+                n_constant,
+                histograms: None,
+            };
+            if let Some(histograms) = node.histograms.take() {
+                self.child_histograms(histograms, &mut left_node, &mut right_node);
+            }
+            pending.push(right_node);
+            pending.push(left_node);
+        }
+    }
+
+    /// Whether a node at this depth with these totals is allowed to split.
+    fn may_split(&self, depth: usize, totals: &Totals) -> bool {
+        let depth_allows = self.params.max_depth.is_none_or(|max_depth| depth < max_depth);
+        depth_allows && totals.count >= 2.0 * self.params.min_samples_leaf as f64
+    }
+
+    /// Whether a node is large enough to keep its histograms for its children.
+    fn keeps_histograms(&self, node: &PendingNode) -> bool {
+        node.end - node.start >= KEEP_HISTOGRAMS && self.may_split(node.depth, &node.totals)
+    }
+
+    /// Fill one histogram per feature the node could still split on.
+    fn fill_histograms(&self, histograms: &mut [Histogram], node: &PendingNode) {
+        let samples = &self.samples[node.start..node.end];
+        let mut is_candidate = vec![false; histograms.len()];
+        self.feature_order[node.n_constant..].iter().for_each(|&feature| is_candidate[feature] = true);
+        let fill = |(feature, histogram): (usize, &mut Histogram)| {
+            if is_candidate[feature] {
+                histogram.fill(self.binned.bins(feature), samples, self.targets);
+            }
+        };
+        if self.params.parallel && samples.len() * histograms.len() >= PARALLEL_WORK {
+            histograms.par_iter_mut().enumerate().for_each(fill);
+        } else {
+            histograms.iter_mut().enumerate().for_each(fill);
+        }
+    }
+
+    /// An empty set of histograms, one per feature.
+    fn empty_histograms(&mut self) -> Vec<Histogram> {
+        let n_channels = self.targets.n_channels();
+        let new = || (0..self.binned.n_features()).map(|_| Histogram::new(n_channels)).collect();
+        self.spare_histograms.pop().unwrap_or_else(new)
+    }
+
+    /// Empty a set of histograms and keep it for reuse.
+    fn recycle(&mut self, mut histograms: Vec<Histogram>) {
+        histograms.iter_mut().for_each(Histogram::clear);
+        self.spare_histograms.push(histograms);
+    }
+
+    /// Hand a split node's histograms on to its children.
+    ///
+    /// Every sample of the parent went to exactly one child, so
+    /// `parent = left + right` in every bin. Only the smaller child's
+    /// histograms are filled by visiting its samples; the larger child's
+    /// are what is left after taking those out of the parent's. That at
+    /// least halves the work of the most expensive step in growing a tree.
+    fn child_histograms(&mut self, parent: Vec<Histogram>, left: &mut PendingNode, right: &mut PendingNode) {
+        let (smaller, larger) = if left.end - left.start <= right.end - right.start { (left, right) } else { (right, left) };
+        let (smaller_keeps, larger_keeps) = (self.keeps_histograms(smaller), self.keeps_histograms(larger));
+        if !larger_keeps {
+            // The smaller child is then too small to keep any either.
+            return self.recycle(parent);
+        }
+        let mut of_smaller = self.empty_histograms();
+        self.fill_histograms(&mut of_smaller, smaller);
+        let mut of_larger = parent;
+        for (remaining, part) in of_larger.iter_mut().zip(&of_smaller) {
+            remaining.subtract(part);
+        }
+        larger.histograms = Some(of_larger);
+        if smaller_keeps {
+            smaller.histograms = Some(of_smaller);
+        } else {
+            self.recycle(of_smaller);
         }
     }
 
@@ -218,16 +308,48 @@ impl<'a> TreeBuilder<'a> {
 
     /// The best split of a node, together with the number of features
     /// now known to be constant across its samples.
-    fn best_split(&mut self, node: &PendingNode) -> (Option<Split>, usize) {
-        if self.params.features_per_split >= self.feature_order.len() {
-            self.best_split_over_all_features(node)
-        } else {
-            self.best_split_over_random_features(node)
+    fn best_split(&mut self, node: &mut PendingNode) -> (Option<Split>, usize) {
+        if self.params.features_per_split < self.feature_order.len() {
+            return self.best_split_over_random_features(node);
+        }
+        if node.histograms.is_none() && self.keeps_histograms(node) {
+            // Only the root arrives here: every other large node was
+            // given its histograms when its parent was split.
+            let mut histograms = self.empty_histograms();
+            self.fill_histograms(&mut histograms, node);
+            node.histograms = Some(histograms);
+        }
+        match &node.histograms {
+            Some(histograms) => self.best_split_from_histograms(node, histograms),
+            None => self.best_split_over_all_features(node),
         }
     }
 
-    /// Examine every feature that could split the node. For a large node
-    /// the features are examined in parallel.
+    /// The best split over every feature, read from histograms that are
+    /// already filled.
+    fn best_split_from_histograms(&mut self, node: &PendingNode, histograms: &[Histogram]) -> (Option<Split>, usize) {
+        let min_samples_leaf = self.params.min_samples_leaf as f64;
+        let mut best: Option<Split> = None;
+        let mut score_to_beat = node.totals.score() * MIN_IMPROVEMENT;
+        let mut n_constant = node.n_constant;
+        for position in node.n_constant..self.feature_order.len() {
+            let feature = self.feature_order[position];
+            let histogram = &histograms[feature];
+            if histogram.n_occupied_bins() == 1 {
+                self.feature_order.swap(position, n_constant);
+                n_constant += 1;
+            } else if let Some(cut) = histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat) {
+                // On equal scores the first feature examined wins.
+                score_to_beat = cut.score;
+                best = Some(Split::new(feature, cut));
+            }
+        }
+        (best, n_constant)
+    }
+
+    /// Examine every feature that could split a small node, filling a
+    /// histogram for each in turn. For a large node the features are
+    /// examined in parallel.
     fn best_split_over_all_features(&mut self, node: &PendingNode) -> (Option<Split>, usize) {
         let samples = &self.samples[node.start..node.end];
         let (binned, targets) = (self.binned, self.targets);

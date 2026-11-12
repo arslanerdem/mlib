@@ -241,6 +241,26 @@ impl Histogram {
         }
     }
 
+    /// Take another histogram's samples out of this one. `part` must hold
+    /// a subset of this histogram's samples — as a child node's samples
+    /// are a subset of its parent's. What remains is the histogram of the
+    /// other child, obtained without visiting a single one of its samples.
+    pub fn subtract(&mut self, part: &Histogram) {
+        for bin in part.occupied_bins() {
+            let cell = &mut self.cells[bin * self.stride..][..self.stride];
+            let part_cell = &part.cells[bin * self.stride..][..self.stride];
+            // Counts are whole numbers, so this comparison is exact.
+            if cell[0] == part_cell[0] {
+                cell.fill(0.0);
+                self.occupied[bin / 64] &= !(1 << (bin % 64));
+            } else {
+                for (value, part_value) in cell.iter_mut().zip(part_cell) {
+                    *value -= part_value;
+                }
+            }
+        }
+    }
+
     /// The bins that hold at least one sample, in increasing order.
     fn occupied_bins(&self) -> impl Iterator<Item = usize> {
         let occupied = self.occupied;
@@ -283,7 +303,9 @@ impl Histogram {
 
             let right_count = parent.count - left.count;
             let right_weight = parent.weight - left.weight;
-            if left.count < min_samples_leaf || right_count < min_samples_leaf || right_weight <= 0.0 {
+            let too_few = left.count < min_samples_leaf || right_count < min_samples_leaf;
+            // A side can hold samples yet (almost) no weight; it cannot be scored.
+            if too_few || left.weight <= 0.0 || right_weight <= 0.0 {
                 continue;
             }
             let right_squares: f64 =

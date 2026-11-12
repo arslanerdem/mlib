@@ -34,6 +34,12 @@ impl Rng {
         ((self.next_u64() as u128 * n as u128) >> 64) as usize
     }
 
+    /// `true` with the given probability (0 never, 1 always).
+    pub fn chance(&mut self, probability: f64) -> bool {
+        // The top 53 bits make a uniform number in [0, 1).
+        ((self.next_u64() >> 11) as f64) < probability * (1u64 << 53) as f64
+    }
+
     /// Shuffle a slice in place (Fisher–Yates).
     pub fn shuffle<T>(&mut self, items: &mut [T]) {
         for i in (1..items.len()).rev() {

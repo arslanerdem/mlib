@@ -2,7 +2,7 @@
 
 Machine learning for tabular data in Rust: fast, and written to be read.
 
-> **Early development.** This is version 0.0.2: it works and is tested,
+> **Early development.** This is version 0.0.3: it works and is tested,
 > but the API will change before 0.1.0.
 
 ```rust
@@ -29,12 +29,21 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-Gradient boosting is a drop-in replacement for the forest:
+Gradient boosting is a drop-in replacement for the forest. It can hold
+some rows out and stop when they stop improving:
 
 ```rust
-let boosting = GradientBoostingSpec::default().n_rounds(200).learning_rate(0.05).build()?;
+let boosting = GradientBoostingSpec::default()
+    .n_rounds(500)
+    .learning_rate(0.05)
+    .subsample(0.8)                    // each round sees a random 80% of the rows
+    .early_stopping_rounds(Some(20))   // stop 20 rounds after the best one
+    .build()?;
 let pipe = Pipeline::new(vec![Box::new(pre)], Box::new(boosting));
 ```
+
+A saved model keeps working: from 0.1.0 on, a file saved by one 0.1.x
+release loads and predicts the same in every later one.
 
 Several numeric targets can be predicted together — name them all in the
 `ModelSpec`, and `predict` returns one column per target:
@@ -108,20 +117,20 @@ src/
 
 Measured against scikit-learn 1.9.1 on a 10-core machine, with 100 trees
 or boosting rounds and the same data and settings for both. The numbers
-are how many times faster mlib is; below 1 means slower.
+are how many times faster mlib is; 1.0 means the same speed.
 
 | Dataset (train rows × features) | Forest fit | Forest predict | Boosting fit | Boosting predict |
 |---|---|---|---|---|
-| California housing (16,512 × 8) | 4.0× | 4.5× | 5.0× | 7.3× |
-| Friedman #1 (80,000 × 10) | 4.6× | 2.6× | 1.8× | 4.2× |
-| Synthetic (80,000 × 20) | 10.5× | 2.6× | 1.6× | 4.5× |
-| Covertype (464,809 × 54, 7 classes) | 3.0× | 1.6× | 0.7× | 5.2× |
-| Synthetic (800,000 × 20) | 13.8× | 2.4× | 0.8× | 3.1× |
+| California housing (16,512 × 8) | 4.2× | 4.8× | 7.9× | 7.6× |
+| Friedman #1 (80,000 × 10) | 4.7× | 3.1× | 3.6× | 4.7× |
+| Synthetic (80,000 × 20) | 10.1× | 2.4× | 2.4× | 3.9× |
+| Covertype (464,809 × 54, 7 classes) | 3.0× | 1.8× | 1.6–2.2× | 6.6× |
+| Synthetic (800,000 × 20) | 13.8× | 2.3× | 1.0–1.7× | 3.6× |
 
 Forest scores are within 0.003 of scikit-learn's and boosting scores
 within 0.001 or better. Boosting is compared with scikit-learn's
-histogram gradient boosting; fitting it on large data is the known
-weak spot.
+histogram gradient boosting. Where a range is shown, scikit-learn's
+timing varied between runs; the low end is against its best run.
 
 ## Licence
 

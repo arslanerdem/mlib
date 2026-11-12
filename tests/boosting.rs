@@ -207,3 +207,75 @@ fn several_targets_are_predicted_together() {
     // A classifier takes one target only.
     assert!(GradientBoostingSpec::new().build().unwrap().fit(&train).is_err());
 }
+
+/// A regression target with a lot of noise: easy to overfit.
+fn noisy_regression(n: usize, seed: u64) -> EncodedData {
+    let x = features(n, seed);
+    let mut noise = Rng::new(seed, 99);
+    let y = Array2::from_shape_fn((n, 1), |(i, _)| {
+        10.0 * x[[i, 0]] + 4.0 * (noise.next_u64() as f64 / u64::MAX as f64 - 0.5)
+    });
+    EncodedData::new(x, y).unwrap()
+}
+
+#[test]
+fn early_stopping_stops_before_the_model_overfits() {
+    let (train, test) = (noisy_regression(2000, 1), noisy_regression(2000, 2));
+    let all_rounds = GradientBoostingSpec::regressor().n_rounds(400).learning_rate(0.3);
+    let stopped = all_rounds.clone().early_stopping_rounds(Some(10)).build().unwrap().fit(&train).unwrap();
+    let overfitted = all_rounds.build().unwrap().fit(&train).unwrap();
+
+    // It stopped long before 400 rounds, and kept the best round's model.
+    let losses = stopped.validation_losses();
+    assert!(stopped.n_rounds() < 100, "ran {} rounds", stopped.n_rounds());
+    assert_eq!(losses.len(), stopped.n_rounds() + 10);
+    let best = losses.iter().copied().fold(f64::INFINITY, f64::min);
+    assert_eq!(losses[stopped.n_rounds() - 1], best);
+
+    // Stopping early generalises better than running every round.
+    assert!(stopped.score(&test).unwrap() > overfitted.score(&test).unwrap());
+    // Without early stopping nothing is held out and nothing is recorded.
+    assert_eq!((overfitted.n_rounds(), overfitted.validation_losses().len()), (400, 0));
+}
+
+#[test]
+fn early_stopping_works_for_classifiers() {
+    for data in [two_classes(2000, 1), three_classes(2000, 1)] {
+        let spec = GradientBoostingSpec::new().n_rounds(300).early_stopping_rounds(Some(5)).build().unwrap();
+        let model = spec.fit(&data).unwrap();
+        assert!(model.n_rounds() < 300);
+        assert!(model.validation_losses().iter().all(|loss| loss.is_finite() && *loss >= 0.0));
+        assert!(model.score(&data).unwrap() > 0.9);
+    }
+}
+
+#[test]
+fn subsampling_is_random_but_repeatable() {
+    let (train, test) = (regression(3000, 1), regression(1000, 2));
+    let fit = |seed| GradientBoostingSpec::regressor().subsample(0.5).seed(seed).build().unwrap().fit(&train).unwrap();
+    // Same seed, same model; another seed, another model.
+    assert_eq!(fit(1), fit(1));
+    assert_ne!(fit(1), fit(2));
+    // Half the rows per round is still plenty to learn this function.
+    assert!(fit(1).score(&test).unwrap() > 0.97);
+}
+
+#[test]
+fn the_new_settings_are_validated_and_reachable_by_name() {
+    assert!(GradientBoostingSpec::new().subsample(0.0).build().is_err());
+    assert!(GradientBoostingSpec::new().subsample(1.1).build().is_err());
+    assert!(GradientBoostingSpec::new().early_stopping_rounds(Some(0)).build().is_err());
+    assert!(GradientBoostingSpec::new().validation_fraction(1.0).build().is_err());
+
+    let mut spec = GradientBoostingSpec::new().build().unwrap();
+    Estimator::set_param(&mut spec, "subsample", &ParamValue::Float(0.8)).unwrap();
+    Estimator::set_param(&mut spec, "early_stopping_rounds", &ParamValue::Int(7)).unwrap();
+    assert_eq!((spec.spec().subsample, spec.spec().early_stopping_rounds), (0.8, Some(7)));
+    Estimator::set_param(&mut spec, "early_stopping_rounds", &ParamValue::Text("none".to_string())).unwrap();
+    assert_eq!(spec.spec().early_stopping_rounds, None);
+
+    // Too few rows to hold any out.
+    let tiny = regression(3, 1);
+    let cannot_hold_out = GradientBoostingSpec::regressor().early_stopping_rounds(Some(5)).validation_fraction(0.01);
+    assert!(cannot_hold_out.build().unwrap().fit(&tiny).is_err());
+}

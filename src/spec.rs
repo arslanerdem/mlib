@@ -126,10 +126,11 @@ impl<'a> ModelData<'a> {
         Ok(y)
     }
 
-    /// The first (usually the only) target, one value per row.
+    /// The target as a plain list, one value per row. Fails unless the
+    /// spec names exactly one target; with several, use `y_matrix`.
     pub fn y(&self) -> Result<Vec<f64>> {
-        if self.spec.y_columns.is_empty() {
-            return Err(Error::shape("at least one target column", "no targets"));
+        if self.spec.y_columns.len() != 1 {
+            return Err(Error::shape("one target column", format!("{} targets", self.spec.y_columns.len())));
         }
         Ok(self.y_matrix()?.column(0).to_vec())
     }
