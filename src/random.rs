@@ -4,6 +4,24 @@
 //! every machine and every release — an external RNG crate may change its
 //! streams between versions.
 
+/// The generator. For your own algorithms that need randomness which
+/// must be reproducible.
+///
+/// ```
+/// use mlib::random::Rng;
+///
+/// let mut rng = Rng::new(42, 0);
+/// let mut again = Rng::new(42, 0);
+/// assert_eq!(rng.next_u64(), again.next_u64()); // same seed, same numbers
+///
+/// assert!(rng.below(10) < 10);
+/// assert!(rng.chance(1.0) && !rng.chance(0.0));
+///
+/// let mut rows = [0, 1, 2, 3, 4];
+/// rng.shuffle(&mut rows);
+/// rows.sort();
+/// assert_eq!(rows, [0, 1, 2, 3, 4]); // shuffling loses nothing
+/// ```
 #[derive(Debug, Clone)]
 pub struct Rng {
     state: u64,
@@ -21,6 +39,7 @@ impl Rng {
         rng
     }
 
+    /// The next random 64-bit number.
     pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;

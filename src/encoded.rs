@@ -13,6 +13,13 @@ use serde::{Deserialize, Serialize};
 /// The identity of one model-context feature. Structured, not a string:
 /// a name like `a_b_c` cannot say whether it is column `a_b` category `c`
 /// or column `a` category `b_c`. Display names are derived, never parsed.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// assert_eq!(Feature::numeric("age").display_name(), "age");
+/// assert_eq!(Feature::one_hot("sex", "female").display_name(), "sex=female");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Feature {
     /// Input column this feature came from.
@@ -22,10 +29,12 @@ pub struct Feature {
 }
 
 impl Feature {
+    /// A feature that is an input column as it stands.
     pub fn numeric(source: &str) -> Feature {
         Feature { source: source.to_string(), category: None }
     }
 
+    /// The 0/1 feature for one category of an input column.
     pub fn one_hot(source: &str, category: &str) -> Feature {
         Feature { source: source.to_string(), category: Some(category.to_string()) }
     }
@@ -47,6 +56,22 @@ pub(crate) fn rank_importances(features: &[Feature], importances: &[f64]) -> Vec
     ranked
 }
 
+/// The numbers a model trains on or predicts from. A fitted pipeline
+/// builds this for you; build it yourself to use a model without one.
+///
+/// ```
+/// use mlib::ndarray::array;
+/// use mlib::prelude::*;
+///
+/// let x = array![[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]];
+/// let y = array![[0.0], [0.0], [1.0]];
+/// let data = EncodedData::new(x, y)?;
+/// assert_eq!((data.num_rows(), data.num_features()), (3, 2));
+/// assert_eq!(data.feature_names(), ["x0", "x1"]);
+/// assert_eq!(data.target()?, [0.0, 0.0, 1.0]);
+/// assert_eq!(data.take_rows(&[2]).x, array![[3.0, 30.0]]);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodedData {
     /// (n_samples, n_features). Dense, no nulls.
@@ -113,10 +138,12 @@ impl EncodedData {
         Ok(EncodedData { x, y, weights, features })
     }
 
+    /// Number of rows (samples).
     pub fn num_rows(&self) -> usize {
         self.x.nrows()
     }
 
+    /// Number of features (columns of `x`).
     pub fn num_features(&self) -> usize {
         self.x.ncols()
     }

@@ -1,0 +1,5 @@
+# The code is written at about 120 columns. "Max" lets anything that fits on
+# one line stay on one line, instead of breaking short struct literals and
+# method chains early.
+max_width = 120
+use_small_heuristics = "Max"

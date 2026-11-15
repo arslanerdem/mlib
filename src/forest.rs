@@ -7,6 +7,7 @@
 //! [`ValidRandomForestSpec`] (checked) → `fit()` → [`FittedRandomForest`]
 //! (learned state only).
 
+use crate::classes::{self, TrainingClasses};
 use crate::encoded::{rank_importances, EncodedData, Feature};
 use crate::error::{Error, Result};
 use crate::random::Rng;
@@ -17,11 +18,26 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// How many features each split may choose from.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// // With 16 features: all 16, 4, 4, or 8 of them, drawn afresh at every split.
+/// for choice in [MaxFeatures::All, MaxFeatures::Sqrt, MaxFeatures::Log2, MaxFeatures::Fraction(0.5)] {
+///     let forest = RandomForestSpec::default().max_features(choice).build()?;
+///     assert_eq!(forest.spec().max_features, choice);
+/// }
+/// assert!(RandomForestSpec::default().max_features(MaxFeatures::Fraction(1.5)).build().is_err());
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MaxFeatures {
+    /// Every feature.
     All,
+    /// The square root of the number of features.
     Sqrt,
+    /// The base-2 logarithm of the number of features.
     Log2,
     /// A fraction of the features, in (0, 1].
     Fraction(f64),
@@ -42,6 +58,26 @@ impl MaxFeatures {
 
 /// Random forest hyper-parameters. `RandomForestSpec::default()` trains
 /// a classifier out of the box.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let spec = RandomForestSpec::default()
+///     .n_trees(200)
+///     .max_depth(Some(8))
+///     .max_features(MaxFeatures::Fraction(0.5))
+///     .min_samples_leaf(5)
+///     .seed(42);
+/// let forest = spec.build()?; // checked, ready to fit
+/// assert_eq!(forest.spec().n_trees, 200);
+///
+/// // A setting that makes no sense is caught here, not during the fit.
+/// assert!(RandomForestSpec::default().n_trees(0).build().is_err());
+///
+/// let regressor = RandomForestSpec::regressor().build()?;
+/// assert_eq!(regressor.spec().task, Task::Regression);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RandomForestSpec {
@@ -87,36 +123,47 @@ impl RandomForestSpec {
         RandomForestSpec { task: Task::Regression, max_features: MaxFeatures::All, ..Default::default() }
     }
 
+    /// Classification or regression.
     pub fn task(mut self, task: Task) -> RandomForestSpec {
         self.task = task;
         self
     }
 
+    /// How many trees to grow. More trees give steadier predictions and
+    /// take proportionally longer.
     pub fn n_trees(mut self, n: usize) -> RandomForestSpec {
         self.n_trees = n;
         self
     }
 
+    /// The most splits between the root and a leaf; `None` for no limit.
     pub fn max_depth(mut self, depth: Option<usize>) -> RandomForestSpec {
         self.max_depth = depth;
         self
     }
 
+    /// How many features each split may choose from.
     pub fn max_features(mut self, max_features: MaxFeatures) -> RandomForestSpec {
         self.max_features = max_features;
         self
     }
 
+    /// The fewest rows a leaf may hold. Larger values give smoother,
+    /// smaller trees.
     pub fn min_samples_leaf(mut self, n: usize) -> RandomForestSpec {
         self.min_samples_leaf = n;
         self
     }
 
+    /// Whether each tree trains on a bootstrap sample of the rows
+    /// (drawn with replacement) rather than on all of them.
     pub fn bootstrap(mut self, bootstrap: bool) -> RandomForestSpec {
         self.bootstrap = bootstrap;
         self
     }
 
+    /// The seed for all random choices. The same seed and data always
+    /// give the same forest.
     pub fn seed(mut self, seed: u64) -> RandomForestSpec {
         self.seed = seed;
         self
@@ -145,6 +192,25 @@ impl RandomForestSpec {
 
 /// A `RandomForestSpec` that passed validation. Create one with
 /// [`RandomForestSpec::build`].
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// // 200 rows; the class is 1 when the first feature is large.
+/// let x = Array2::from_shape_fn((200, 2), |(row, feature)| ((row * (feature + 3)) % 50) as f64);
+/// let y = Array2::from_shape_fn((200, 1), |(row, _)| if x[[row, 0]] >= 25.0 { 1.0 } else { 0.0 });
+/// let data = EncodedData::new(x, y)?;
+///
+/// let mut forest = RandomForestSpec::default().n_trees(20).build()?;
+/// let fitted = forest.fit(&data)?;
+/// assert!(fitted.score(&data)? > 0.95);
+///
+/// // Changing a setting by name checks it again.
+/// forest.set_param("max_depth", &2.into())?;
+/// assert!(forest.set_param("n_trees", &0.into()).is_err());
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidRandomForestSpec {
     spec: RandomForestSpec,
@@ -164,12 +230,12 @@ impl Estimator for ValidRandomForestSpec {
         let spec = &self.spec;
         tree::check_training_data(data)?;
 
-        let (targets, classes) = match spec.task {
+        let (targets, classes, classes_per_target) = match spec.task {
             Task::Classification => {
-                let (classes, class_of_row) = tree::class_indices(&tree::class_labels(data)?);
-                (Targets::Classes { class_of_row, n_classes: classes.len() }, classes)
+                let found = TrainingClasses::new(data);
+                (Targets::classes(found.index_of_row, &found.per_target), found.labels, found.per_target)
             }
-            Task::Regression => (Targets::values(&data.y), Vec::new()),
+            Task::Regression => (Targets::values(&data.y), Vec::new(), Vec::new()),
         };
 
         let binned = BinnedFeatures::new(&data.x);
@@ -178,6 +244,8 @@ impl Estimator for ValidRandomForestSpec {
             min_samples_leaf: spec.min_samples_leaf,
             features_per_split: spec.max_features.count(data.num_features()),
             bootstrap: spec.bootstrap,
+            features: (0..data.num_features()).collect(),
+            l2: 0.0,
             parallel: false,
         };
 
@@ -187,7 +255,8 @@ impl Estimator for ValidRandomForestSpec {
             .into_par_iter()
             .map(|t| {
                 let rng = Rng::new(spec.seed, t as u64);
-                tree::grow_tree(&binned, &targets, data.weights.as_deref(), &params, rng)
+                let (tree, gains) = tree::grow_tree(&binned, &targets, data.weights.as_deref(), &params, rng);
+                (tree, tree::as_shares(gains))
             })
             .unzip();
 
@@ -195,7 +264,9 @@ impl Estimator for ValidRandomForestSpec {
             task: spec.task,
             trees,
             classes,
-            feature_importances: tree::average_importances(&tree_importances, data.num_features()),
+            classes_per_target,
+            // Every tree counts the same: the mean of the trees' shares.
+            feature_importances: tree::as_shares(tree::sum_per_feature(&tree_importances, data.num_features())),
             features: data.features.clone(),
             n_features: data.num_features(),
         })
@@ -242,14 +313,61 @@ impl Estimator for ValidRandomForestSpec {
 }
 
 /// A trained forest: learned state only, no reference to the training data.
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// // 200 rows; the class is 1 when the first feature is large.
+/// let x = Array2::from_shape_fn((200, 2), |(row, feature)| ((row * (feature + 3)) % 50) as f64);
+/// let y = Array2::from_shape_fn((200, 1), |(row, _)| if x[[row, 0]] >= 25.0 { 1.0 } else { 0.0 });
+/// let data = EncodedData::new(x, y)?;
+/// let forest = RandomForestSpec::default().n_trees(20).build()?.fit(&data)?;
+///
+/// assert_eq!((forest.n_trees(), forest.n_features()), (20, 2));
+/// assert_eq!(forest.classes(), [0.0, 1.0]);
+/// let (most_important, share) = &forest.ranked_importances()[0];
+/// assert_eq!(most_important, "x0");
+/// assert!(*share > 0.5);
+///
+/// // Every tree can be read.
+/// let deepest = forest.trees().map(Tree::depth).max().unwrap();
+/// println!("the deepest of the {} trees has depth {deepest}", forest.n_trees());
+/// # Ok::<(), Error>(())
+/// ```
+///
+/// With several class targets, the probabilities of each sit side by side:
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// let x = Array2::from_shape_fn((200, 2), |(row, feature)| ((row * (feature + 3)) % 50) as f64);
+/// // Target 0 has two classes, target 1 has three.
+/// let y = Array2::from_shape_fn((200, 2), |(row, target)| {
+///     if target == 0 { (x[[row, 0]] / 25.0).floor() } else { (x[[row, 1]] / 17.0).floor() }
+/// });
+/// let data = EncodedData::new(x, y)?;
+/// let forest = RandomForestSpec::default().n_trees(20).build()?.fit(&data)?;
+///
+/// assert_eq!(forest.predict(&data)?.dim(), (200, 2));       // one column per target
+/// assert_eq!(forest.predict_proba(&data)?.dim(), (200, 5)); // 2 classes, then 3
+/// assert_eq!(forest.target_classes(), [vec![0.0, 1.0], vec![0.0, 1.0, 2.0]]);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FittedRandomForest {
     task: Task,
     trees: Vec<Tree>,
+    /// Every target's classes, one target after another.
     classes: Vec<Label>,
     feature_importances: Vec<f64>,
     features: Vec<Feature>,
     n_features: usize,
+    /// How many classes each target has. Empty in a model saved before
+    /// classifiers took several targets: all classes are its one target's.
+    #[serde(default)]
+    classes_per_target: Vec<usize>,
 }
 
 impl FittedRandomForest {
@@ -258,6 +376,7 @@ impl FittedRandomForest {
         self.task
     }
 
+    /// How many trees the forest has.
     pub fn n_trees(&self) -> usize {
         self.trees.len()
     }
@@ -272,13 +391,18 @@ impl FittedRandomForest {
         self.trees.iter()
     }
 
-    /// The class labels, sorted. Empty for regression.
+    /// The class labels, sorted: what the columns of `predict_proba`
+    /// stand for. With several targets, each target's classes follow the
+    /// previous target's (see `target_classes` for them one by one).
+    /// Empty for regression.
     pub fn classes(&self) -> &[Label] {
         &self.classes
     }
 
     /// How much each feature contributed: one number per feature, summing
-    /// to 1, in the order of `features()`.
+    /// to 1, in the order of `features()`. Each tree's improvement is
+    /// shared out among the features it split on, and the trees' shares
+    /// are averaged.
     pub fn feature_importances(&self) -> &[f64] {
         &self.feature_importances
     }
@@ -288,12 +412,14 @@ impl FittedRandomForest {
         &self.features
     }
 
+    /// How many features the forest was fitted on.
     pub fn n_features(&self) -> usize {
         self.n_features
     }
 
     /// For every row, the average of the trees' leaf predictions: class
-    /// probabilities (classification) or the mean of each target (regression).
+    /// probabilities, the targets side by side (classification), or the
+    /// mean of each target (regression).
     fn average_tree_predictions(&self, data: &EncodedData) -> Result<Array2<f64>> {
         tree::check_n_features(data, self.n_features)?;
         let mut averages = tree::sum_tree_predictions(&self.trees, &data.x);
@@ -316,16 +442,16 @@ impl Predictor for FittedRandomForest {
         let averages = self.average_tree_predictions(data)?;
         Ok(match self.task {
             Task::Regression => averages,
-            Task::Classification => tree::most_probable_classes(&averages, &self.classes),
+            Task::Classification => classes::most_probable(&averages, &self.classes, &self.classes_per_target),
         })
     }
 
     fn predict_proba(&self, data: &EncodedData) -> Result<Array2<f64>> {
         match self.task {
             Task::Classification => self.average_tree_predictions(data),
-            Task::Regression => Err(Error::InvalidSpec(
-                "predict_proba needs a classifier; this forest is a regressor".to_string(),
-            )),
+            Task::Regression => {
+                Err(Error::InvalidSpec("predict_proba needs a classifier; this forest is a regressor".to_string()))
+            }
         }
     }
 
@@ -335,5 +461,9 @@ impl Predictor for FittedRandomForest {
 
     fn feature_importances(&self) -> Option<Vec<f64>> {
         Some(self.feature_importances.clone())
+    }
+
+    fn target_classes(&self) -> Vec<Vec<Label>> {
+        classes::by_target(&self.classes, &self.classes_per_target)
     }
 }

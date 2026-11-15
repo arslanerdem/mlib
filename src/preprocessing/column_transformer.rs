@@ -7,17 +7,51 @@ use crate::traits::{ParamValue, Transformer};
 use serde::{Deserialize, Serialize};
 
 /// What happens to columns no branch asked for.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let table = Table::new(vec![("age", Column::floats(&[30.0, 50.0])), ("visits", Column::ints(&[2, 7]))])?;
+/// let scale_age = || ColumnTransformer::empty().with_branch("num", StandardScaler::new(), &["age"]);
+///
+/// let dropped = scale_age().fit_transform(&table)?;
+/// assert_eq!(dropped.schema().names(), ["age"]);
+///
+/// let kept = scale_age().with_remainder(Remainder::Passthrough).fit_transform(&table)?;
+/// assert_eq!(kept.schema().names(), ["age", "visits"]);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Remainder {
     /// Append them unchanged, in table order.
     Passthrough,
+    /// Leave them out.
     #[default]
     Drop,
 }
 
 /// Sends named column subsets through different branches and joins the
 /// results side by side, in branch order.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let table = Table::new(vec![
+///     ("age", Column::Float(vec![Some(30.0), None, Some(50.0)])),
+///     ("city", Column::texts(&["Oslo", "Rome", "Oslo"])),
+/// ])?;
+/// let mut pre = ColumnTransformer::empty()
+///     .with_branch("num", Imputer::new(ImputeStrategy::Median), &["age"])
+///     .with_branch("cat", OneHotEncoder::new(), &["city"]);
+/// let out = pre.fit_transform(&table)?;
+/// assert_eq!(out.schema().names(), ["age", "city=Oslo", "city=Rome"]);
+/// assert_eq!(out.column("age").unwrap().get_f64(1), Some(40.0));
+///
+/// // A branch's settings are reached by its name.
+/// pre.set_param("num__strategy", &"mean".into())?;
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ColumnTransformer {
     /// (branch name, step, the columns routed to it)
@@ -32,17 +66,14 @@ impl ColumnTransformer {
     }
 
     /// Add a branch: send the named columns through `step`.
-    pub fn with_branch(
-        mut self,
-        name: &str,
-        step: impl Transformer + 'static,
-        columns: &[&str],
-    ) -> ColumnTransformer {
+    pub fn with_branch(mut self, name: &str, step: impl Transformer + 'static, columns: &[&str]) -> ColumnTransformer {
         let columns = columns.iter().map(|column| column.to_string()).collect();
         self.branches.push((name.to_string(), Box::new(step), columns));
         self
     }
 
+    /// Choose what happens to columns no branch asked for (dropped unless
+    /// you say otherwise).
     pub fn with_remainder(mut self, remainder: Remainder) -> ColumnTransformer {
         self.remainder = remainder;
         self
@@ -83,10 +114,7 @@ impl Clone for ColumnTransformer {
         let clone_branch = |(name, step, columns): &(String, Box<dyn Transformer>, Vec<String>)| {
             (name.clone(), step.clone_box(), columns.clone())
         };
-        ColumnTransformer {
-            branches: self.branches.iter().map(clone_branch).collect(),
-            remainder: self.remainder,
-        }
+        ColumnTransformer { branches: self.branches.iter().map(clone_branch).collect(), remainder: self.remainder }
     }
 }
 
@@ -120,9 +148,11 @@ impl Transformer for ColumnTransformer {
             let routed = columns
                 .iter()
                 .map(|column| {
-                    input.iter().find(|feature| &feature.display_name() == column).cloned().ok_or_else(
-                        || Error::SchemaMismatch(format!("missing column '{column}'")),
-                    )
+                    input
+                        .iter()
+                        .find(|feature| &feature.display_name() == column)
+                        .cloned()
+                        .ok_or_else(|| Error::SchemaMismatch(format!("missing column '{column}'")))
                 })
                 .collect::<Result<Vec<Feature>>>()?;
             output.extend(step.output_columns(&routed)?);
@@ -141,8 +171,7 @@ impl Transformer for ColumnTransformer {
     fn set_param(&mut self, name: &str, value: &ParamValue) -> Result<()> {
         let unknown = || Error::InvalidSpec(format!("unknown parameter: {name}"));
         let (branch_name, param) = name.split_once("__").ok_or_else(unknown)?;
-        let (_, step, _) =
-            self.branches.iter_mut().find(|(name, _, _)| name == branch_name).ok_or_else(unknown)?;
+        let (_, step, _) = self.branches.iter_mut().find(|(name, _, _)| name == branch_name).ok_or_else(unknown)?;
         step.set_param(param, value)
     }
 }

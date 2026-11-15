@@ -21,6 +21,42 @@ fn regression(n: usize, seed: u64) -> EncodedData {
     EncodedData::new(x, y).unwrap()
 }
 
+/// Two class targets: a "colour" with three classes (10, 20, 30), set by
+/// the first feature, and a yes/no "size", set by the second.
+fn colour_and_size(n: usize, seed: u64) -> EncodedData {
+    let x = features(n, seed);
+    let y = Array2::from_shape_fn((n, 2), |(i, target)| match target {
+        0 => 10.0 * ((x[[i, 0]] * 3.0).floor().min(2.0) + 1.0),
+        _ => (x[[i, 1]] > 0.6) as u8 as f64,
+    });
+    EncodedData::new(x, y).unwrap()
+}
+
+/// The checks every classifier with several targets must pass.
+fn check_colour_and_size(model: &dyn Predictor, test: &EncodedData) {
+    // One column of predicted labels per target, each from its own classes.
+    let predictions = model.predict(test).unwrap();
+    assert_eq!(predictions.dim(), (test.num_rows(), 2));
+    assert!(predictions.column(0).iter().all(|label| [10.0, 20.0, 30.0].contains(label)));
+    assert!(predictions.column(1).iter().all(|label| [0.0, 1.0].contains(label)));
+    assert!(model.predict_single(test).is_err());
+    for target in 0..2 {
+        let (truth, predicted) = (test.y.column(target).to_vec(), predictions.column(target).to_vec());
+        assert!(accuracy(&truth, &predicted) > 0.9, "target {target}: {}", accuracy(&truth, &predicted));
+    }
+    // The default score is the accuracy averaged over the targets.
+    assert!(model.score(test).unwrap() > 0.9);
+
+    // Probabilities: the three colours, then the two sizes, side by side.
+    assert_eq!(model.target_classes(), vec![vec![10.0, 20.0, 30.0], vec![0.0, 1.0]]);
+    let probabilities = model.predict_proba(test).unwrap();
+    assert_eq!(probabilities.dim(), (test.num_rows(), 5));
+    for row in probabilities.rows() {
+        let (colour, size) = (row.iter().take(3).sum::<f64>(), row.iter().skip(3).sum::<f64>());
+        assert!((colour - 1.0).abs() < 1e-9 && (size - 1.0).abs() < 1e-9);
+    }
+}
+
 #[test]
 fn forests_pass_the_conformance_battery() {
     check_estimator(&RandomForestSpec::new().n_trees(10).build().unwrap());
@@ -34,9 +70,9 @@ fn invalid_specs_are_rejected_before_any_data_is_seen() {
     assert!(RandomForestSpec::new().max_features(MaxFeatures::Fraction(1.5)).build().is_err());
 
     let mut spec = RandomForestSpec::new().build().unwrap();
-    assert!(Estimator::set_param(&mut spec, "n_trees", &ParamValue::Int(0)).is_err());
-    assert!(Estimator::set_param(&mut spec, "no_such_param", &ParamValue::Int(1)).is_err());
-    Estimator::set_param(&mut spec, "max_depth", &ParamValue::Int(3)).unwrap();
+    assert!(spec.set_param("n_trees", &ParamValue::Int(0)).is_err());
+    assert!(spec.set_param("no_such_param", &ParamValue::Int(1)).is_err());
+    spec.set_param("max_depth", &ParamValue::Int(3)).unwrap();
     assert_eq!(spec.spec().max_depth, Some(3));
 }
 
@@ -140,8 +176,14 @@ fn real_data_reaches_the_expected_quality() {
     // binning: this test scored 0.71 then, and scores 0.77 now.
     let table = Table::from_csv("tests/data/california_housing.csv").unwrap();
     let inputs = [
-        "median_income", "house_age", "avg_rooms", "avg_bedrooms",
-        "population", "avg_occupancy", "latitude", "longitude",
+        "median_income",
+        "house_age",
+        "avg_rooms",
+        "avg_bedrooms",
+        "population",
+        "avg_occupancy",
+        "latitude",
+        "longitude",
     ];
     let study = ModelData::new(&table, ModelSpec::new(&inputs, &["median_house_value"])).unwrap();
     let data =
@@ -209,10 +251,23 @@ fn several_targets_are_predicted_together() {
 }
 
 #[test]
-fn a_classifier_takes_one_target_only() {
-    let mut data = classification(200, 1);
-    data.y = Array2::zeros((200, 2));
-    assert!(RandomForestSpec::new().build().unwrap().fit(&data).is_err());
+fn a_classifier_predicts_several_targets_together() {
+    let (train, test) = (colour_and_size(3000, 1), colour_and_size(1000, 2));
+    let model = RandomForestSpec::new().n_trees(50).seed(1).build().unwrap().fit(&train).unwrap();
+    check_colour_and_size(&model, &test);
+    assert_eq!(model.classes(), [10.0, 20.0, 30.0, 0.0, 1.0]);
+
+    // One tree serves both targets: its leaves hold all five probabilities.
+    assert_eq!(model.tree(0).predict_row(&[0.1, 0.9, 0.5, 0.5, 0.5]).len(), 5);
+    // The same data gives the same forest, and a saved one predicts the same.
+    assert_eq!(model, RandomForestSpec::new().n_trees(50).seed(1).build().unwrap().fit(&train).unwrap());
+    let loaded: FittedRandomForest = serde_json::from_str(&serde_json::to_string(&model).unwrap()).unwrap();
+    assert_eq!(loaded.predict_proba(&test).unwrap(), model.predict_proba(&test).unwrap());
+
+    // With one target, nothing changes: one list of classes, one block of columns.
+    let one_target = RandomForestSpec::new().n_trees(5).build().unwrap().fit(&classification(500, 1)).unwrap();
+    assert_eq!(one_target.target_classes(), vec![vec![0.0, 1.0]]);
+    assert!(RandomForestSpec::regressor().n_trees(5).build().unwrap().fit(&train).unwrap().target_classes().is_empty());
 }
 
 #[test]

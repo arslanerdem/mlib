@@ -17,6 +17,16 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// What a model predicts.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let classifier = GradientBoostingSpec::default().build()?;
+/// assert_eq!(classifier.spec().task, Task::Classification);
+/// let regressor = GradientBoostingSpec::default().task(Task::Regression).build()?;
+/// assert_eq!(regressor.spec(), GradientBoostingSpec::regressor().build()?.spec());
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Task {
@@ -31,6 +41,25 @@ pub enum Task {
 /// The layout is built for fast prediction: nodes are 16 bytes each, so
 /// many fit in the CPU cache, and the leaves' predictions sit together in
 /// one array instead of one allocation per leaf.
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// // One feature; the class is 1 from 50 upwards. One tree on all the rows.
+/// let x = Array2::from_shape_fn((100, 1), |(row, _)| row as f64);
+/// let y = x.mapv(|value| if value >= 50.0 { 1.0 } else { 0.0 });
+/// let data = EncodedData::new(x, y)?;
+/// let forest = RandomForestSpec::default().n_trees(1).bootstrap(false).build()?.fit(&data)?;
+///
+/// let tree = forest.tree(0);
+/// assert_eq!((tree.n_nodes(), tree.n_leaves(), tree.depth()), (3, 2, 1));
+///
+/// // A leaf holds the probability of each class.
+/// assert_eq!(tree.predict_row(&[20.0]), [1.0, 0.0]);
+/// assert_eq!(tree.predict_row(&[80.0]), [0.0, 1.0]);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tree {
     pub(crate) nodes: Vec<TreeNode>,
@@ -43,14 +72,48 @@ pub struct Tree {
 }
 
 /// One node of a tree, as [`Tree::node`] describes it.
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// // One feature; the class is 1 from 50 upwards. One tree on all the rows.
+/// let x = Array2::from_shape_fn((100, 1), |(row, _)| row as f64);
+/// let y = x.mapv(|value| if value >= 50.0 { 1.0 } else { 0.0 });
+/// let data = EncodedData::new(x, y)?;
+/// let forest = RandomForestSpec::default().n_trees(1).bootstrap(false).build()?.fit(&data)?;
+/// let tree = forest.tree(0);
+///
+/// // The root asks one question and sends the row left or right.
+/// let Node::Split { feature, threshold, left, right } = tree.node(0) else {
+///     panic!("the root of this tree is a split");
+/// };
+/// assert_eq!(feature, 0);
+/// assert!((49.0..50.0).contains(&threshold));
+/// assert_eq!(tree.node(left), Node::Leaf { prediction: &[1.0, 0.0] });
+/// assert_eq!(tree.node(right), Node::Leaf { prediction: &[0.0, 1.0] });
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node<'a> {
     /// Rows whose `feature` value is at most `threshold` continue at node
     /// `left`; the rest continue at node `right`.
-    Split { feature: usize, threshold: f64, left: usize, right: usize },
+    Split {
+        /// Which feature is looked at, by its position among the model's features.
+        feature: usize,
+        /// The value the feature is compared with.
+        threshold: f64,
+        /// The node for rows at or below the threshold.
+        left: usize,
+        /// The node for rows above it.
+        right: usize,
+    },
     /// The end of a path: class probabilities (classification) or the
     /// mean of each target (regression).
-    Leaf { prediction: &'a [f64] },
+    Leaf {
+        /// One number per class, or one per regression target.
+        prediction: &'a [f64],
+    },
 }
 
 /// Marks a leaf in `TreeNode::feature`.
@@ -233,15 +296,6 @@ pub(crate) fn check_training_data(data: &EncodedData) -> Result<()> {
     Ok(())
 }
 
-/// The class labels of the rows. Classification handles one target;
-/// regression can take several.
-pub(crate) fn class_labels(data: &EncodedData) -> Result<Vec<f64>> {
-    if data.y.ncols() != 1 {
-        return Err(Error::shape("one target for classification", format!("{} targets", data.y.ncols())));
-    }
-    Ok(data.y.column(0).to_vec())
-}
-
 /// A model's default score. Classification: accuracy. Regression: R²,
 /// averaged over the targets when there are several.
 pub(crate) fn default_score(task: Task, y_true: &Array2<f64>, y_pred: &Array2<f64>) -> Result<f64> {
@@ -260,44 +314,22 @@ pub(crate) fn check_n_features(data: &EncodedData, n_features: usize) -> Result<
     Ok(())
 }
 
-/// The distinct target values, sorted, and each row's index into them.
-pub(crate) fn class_indices(y: &[f64]) -> (Vec<f64>, Vec<u32>) {
-    let mut classes = y.to_vec();
-    classes.sort_unstable_by(f64::total_cmp);
-    classes.dedup();
-    // Invariant: every y value is in `classes`, which was built from y.
-    let class_of = |value: &f64| classes.binary_search_by(|class| class.total_cmp(value)).unwrap() as u32;
-    let class_of_row = y.iter().map(class_of).collect();
-    (classes, class_of_row)
+/// Rescale gains to shares that sum to 1 (all zeros stay zeros).
+pub(crate) fn as_shares(mut gains: Vec<f64>) -> Vec<f64> {
+    let total: f64 = gains.iter().sum();
+    if total > 0.0 {
+        gains.iter_mut().for_each(|gain| *gain /= total);
+    }
+    gains
 }
 
-/// A model's importances: the mean of its trees', rescaled to sum to 1.
-pub(crate) fn average_importances(per_tree: &[Vec<f64>], n_features: usize) -> Vec<f64> {
-    let mut importances = vec![0.0; n_features];
-    for tree in per_tree {
-        for (total, importance) in importances.iter_mut().zip(tree) {
-            *total += importance;
+/// Add up several lists of per-feature numbers, feature by feature.
+pub(crate) fn sum_per_feature<'a>(lists: impl IntoIterator<Item = &'a Vec<f64>>, n_features: usize) -> Vec<f64> {
+    let mut totals = vec![0.0; n_features];
+    for list in lists {
+        for (total, value) in totals.iter_mut().zip(list) {
+            *total += value;
         }
     }
-    let sum: f64 = importances.iter().sum();
-    if sum > 0.0 {
-        importances.iter_mut().for_each(|importance| *importance /= sum);
-    }
-    importances
-}
-
-/// Each row's most probable class label, as a one-column matrix. Ties
-/// go to the first class.
-pub(crate) fn most_probable_classes(probabilities: &Array2<f64>, classes: &[f64]) -> Array2<f64> {
-    let label_of = |row: ndarray::ArrayView1<f64>| {
-        let mut best = 0;
-        for (class, probability) in row.iter().enumerate() {
-            if *probability > row[best] {
-                best = class;
-            }
-        }
-        classes[best]
-    };
-    let labels: Vec<f64> = probabilities.rows().into_iter().map(label_of).collect();
-    Array2::from_shape_vec((labels.len(), 1), labels).expect("one label per row")
+    totals
 }

@@ -8,6 +8,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// What to do with a category at transform time that was not seen at fit.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let train = Table::new(vec![("city", Column::texts(&["Oslo", "Rome"]))])?;
+/// let new = Table::new(vec![("city", Column::texts(&["Paris"]))])?;
+///
+/// let mut lenient = OneHotEncoder::new(); // HandleUnknown::Ignore
+/// lenient.fit(&train)?;
+/// assert!(lenient.transform(&new).is_ok());
+///
+/// let mut strict = OneHotEncoder::new().with_handle_unknown(HandleUnknown::Error);
+/// strict.fit(&train)?;
+/// assert!(strict.transform(&new).is_err());
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum HandleUnknown {
@@ -26,6 +42,24 @@ pub enum HandleUnknown {
 /// The category list is learned at fit and never re-derived: an unseen
 /// category (or a null) at transform time encodes as all-zeros, so the
 /// output columns are always the same.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let train = Table::new(vec![("city", Column::texts(&["Oslo", "Rome", "Oslo"]))])?;
+/// let mut encoder = OneHotEncoder::new();
+/// let encoded = encoder.fit_transform(&train)?;
+/// assert_eq!(encoded.schema().names(), ["city=Oslo", "city=Rome"]);
+/// assert_eq!(encoded.column("city=Rome").unwrap().get_f64(1), Some(1.0));
+/// assert_eq!(encoder.categories()["city"], ["Oslo", "Rome"]);
+///
+/// // A city not seen at fit time is neither Oslo nor Rome.
+/// let new = Table::new(vec![("city", Column::texts(&["Paris"]))])?;
+/// let encoded = encoder.transform(&new)?;
+/// assert_eq!(encoded.column_at(0).get_f64(0), Some(0.0));
+/// assert_eq!(encoded.column_at(1).get_f64(0), Some(0.0));
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct OneHotEncoder {
     handle_unknown: HandleUnknown,
@@ -35,10 +69,12 @@ pub struct OneHotEncoder {
 }
 
 impl OneHotEncoder {
+    /// An unfitted encoder that encodes unseen categories as all-zeros.
     pub fn new() -> OneHotEncoder {
         OneHotEncoder::default()
     }
 
+    /// Choose what happens to a category that was not seen at fit time.
     pub fn with_handle_unknown(mut self, handle_unknown: HandleUnknown) -> OneHotEncoder {
         self.handle_unknown = handle_unknown;
         self
@@ -104,9 +140,7 @@ impl Transformer for OneHotEncoder {
         let mut output = Vec::new();
         for feature in input {
             match self.categories.get(&feature.display_name()) {
-                Some(categories) => {
-                    output.extend(categories.iter().map(|c| Feature::one_hot(&feature.source, c)))
-                }
+                Some(categories) => output.extend(categories.iter().map(|c| Feature::one_hot(&feature.source, c))),
                 None => output.push(feature.clone()),
             }
         }
@@ -152,9 +186,7 @@ fn category_indices(column: &Column, categories: &[String]) -> Vec<Option<usize>
             let lookup = |value: &Option<bool>| position.get(value.as_ref()?.to_string().as_str()).copied();
             values.iter().map(lookup).collect()
         }
-        Column::Text(values) => {
-            values.iter().map(|value| position.get(value.as_ref()?.as_str()).copied()).collect()
-        }
+        Column::Text(values) => values.iter().map(|value| position.get(value.as_ref()?.as_str()).copied()).collect(),
         Column::Categorical { codes, categories: dictionary } => {
             // Translate the dictionary once, then each row is a table lookup.
             let translated: Vec<Option<usize>> =

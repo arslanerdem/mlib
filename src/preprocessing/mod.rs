@@ -4,14 +4,16 @@
 //! re-applies them verbatim at `transform` — the defence against
 //! train/predict skew.
 
+mod categorical_imputer;
 mod chain;
 mod column_transformer;
 mod encoder;
 mod imputer;
 mod scaler;
 
-pub use chain::Chain;
+pub use categorical_imputer::{CategoricalFill, CategoricalImputer};
 pub(crate) use chain::set_param_on_first;
+pub use chain::Chain;
 pub use column_transformer::{ColumnTransformer, Remainder};
 pub use encoder::{HandleUnknown, OneHotEncoder};
 pub use imputer::{ImputeStrategy, Imputer};

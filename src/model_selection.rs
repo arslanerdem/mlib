@@ -17,15 +17,43 @@ use std::collections::{BTreeMap, HashMap};
 pub use crate::traits::ParamValue;
 
 /// One (train_indices, test_indices) pair per fold.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let folds: Folds = KFold::new(2).splits(4);
+/// assert_eq!(folds, [(vec![2, 3], vec![0, 1]), (vec![0, 1], vec![2, 3])]);
+/// ```
 pub type Folds = Vec<(Vec<usize>, Vec<usize>)>;
 
 /// Split row indices into (train, test) by ratio, in row order.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let (train, test) = train_test_split(5, 0.8);
+/// assert_eq!((train, test), (vec![0, 1, 2, 3], vec![4]));
+/// ```
 pub fn train_test_split(n_rows: usize, train_ratio: f64) -> (Vec<usize>, Vec<usize>) {
     let n_train = ((n_rows as f64 * train_ratio.clamp(0.0, 1.0)).round() as usize).min(n_rows);
     ((0..n_train).collect(), (n_train..n_rows).collect())
 }
 
 /// Like `train_test_split`, but rows are assigned at random (by seed).
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let table = Table::new(vec![("age", Column::floats(&[34.0, 51.0, 29.0, 62.0, 45.0]))])?;
+/// let (train, test) = train_test_split_shuffled(table.num_rows(), 0.8, 42);
+/// assert_eq!((train.len(), test.len()), (4, 1));
+/// // The same seed always gives the same split.
+/// assert_eq!(train_test_split_shuffled(5, 0.8, 42), (train.clone(), test.clone()));
+///
+/// let train_table = table.take_rows(&train);
+/// assert_eq!(train_table.num_rows(), 4);
+/// # Ok::<(), Error>(())
+/// ```
 pub fn train_test_split_shuffled(n_rows: usize, train_ratio: f64, seed: u64) -> (Vec<usize>, Vec<usize>) {
     let mut indices: Vec<usize> = (0..n_rows).collect();
     Rng::new(seed, 0).shuffle(&mut indices);
@@ -59,6 +87,15 @@ fn row_order(n_rows: usize, shuffle: bool, seed: Option<u64>) -> Vec<usize> {
 ///
 /// `splits` returns no folds if `n_splits` is below 2 or above the row
 /// count (cross-validation then reports the problem).
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let folds = KFold::new(5).with_shuffle(42).splits(100);
+/// assert_eq!(folds.len(), 5);
+/// let (train, test) = &folds[0];
+/// assert_eq!((train.len(), test.len()), (80, 20));
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct KFold {
     n_splits: usize,
@@ -67,6 +104,7 @@ pub struct KFold {
 }
 
 impl KFold {
+    /// K-fold with this many folds, dealt in row order.
     pub fn new(n_splits: usize) -> KFold {
         KFold { n_splits, shuffle: false, seed: None }
     }
@@ -78,6 +116,7 @@ impl KFold {
         self
     }
 
+    /// The folds for a dataset with this many rows.
     pub fn splits(&self, n_rows: usize) -> Folds {
         if self.n_splits < 2 || self.n_splits > n_rows {
             return Vec::new();
@@ -91,6 +130,18 @@ impl KFold {
 }
 
 /// Stratified k-fold: every fold keeps the class proportions of `y`.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// // One row in four is of class 1.
+/// let y: Vec<f64> = (0..40).map(|row| if row % 4 == 0 { 1.0 } else { 0.0 }).collect();
+/// let folds = StratifiedKFold::new(5).with_shuffle(42).splits(&y, y.len());
+/// for (_, test) in &folds {
+///     let ones = test.iter().filter(|&&row| y[row] == 1.0).count();
+///     assert_eq!((test.len(), ones), (8, 2));
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct StratifiedKFold {
     n_splits: usize,
@@ -99,16 +150,20 @@ pub struct StratifiedKFold {
 }
 
 impl StratifiedKFold {
+    /// Stratified k-fold with this many folds.
     pub fn new(n_splits: usize) -> StratifiedKFold {
         StratifiedKFold { n_splits, shuffle: false, seed: None }
     }
 
+    /// Shuffle the rows (reproducibly, by seed) before splitting.
     pub fn with_shuffle(mut self, seed: u64) -> StratifiedKFold {
         self.shuffle = true;
         self.seed = Some(seed);
         self
     }
 
+    /// The folds for the target `y`, one value per row. No folds if `y`
+    /// does not have `n_rows` values.
     pub fn splits(&self, y: &[f64], n_rows: usize) -> Folds {
         if self.n_splits < 2 || self.n_splits > n_rows || y.len() != n_rows {
             return Vec::new();
@@ -128,16 +183,31 @@ impl StratifiedKFold {
 
 /// Grouped k-fold: rows that share a group id always land in the same
 /// fold. Get the ids from `ModelData::groups()`.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// // Six visits by three patients: a patient is never split across folds.
+/// let patient = [0, 0, 1, 1, 2, 2];
+/// let folds = GroupKFold::new(3).splits(&patient, patient.len());
+/// for (train, test) in &folds {
+///     assert!(test.iter().all(|&row| patient[row] == patient[test[0]]));
+///     assert!(train.iter().all(|&row| patient[row] != patient[test[0]]));
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupKFold {
     n_splits: usize,
 }
 
 impl GroupKFold {
+    /// Grouped k-fold with this many folds.
     pub fn new(n_splits: usize) -> GroupKFold {
         GroupKFold { n_splits }
     }
 
+    /// The folds for the given group ids, one per row. No folds if there
+    /// are fewer groups than folds.
     pub fn splits(&self, groups: &[i64], n_rows: usize) -> Folds {
         let mut size_of_group: BTreeMap<i64, usize> = BTreeMap::new();
         for group in groups {
@@ -163,13 +233,16 @@ impl GroupKFold {
 }
 
 /// Scores from cross-validation. Loss metrics (rmse, mse, mae, log_loss)
-/// are negated, so higher is always better.
+/// are negated, so higher is always better. See [`cross_validate`] for
+/// an example.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct CrossValidationResult {
     /// One score per fold, in fold order. The mean alone hides the spread.
     pub scores: Vec<f64>,
+    /// The average of the fold scores.
     pub mean: f64,
+    /// The standard deviation of the fold scores.
     pub std: f64,
 }
 
@@ -216,6 +289,26 @@ fn score_model(model: &dyn Predictor, test: &EncodedData, scorer: &dyn Scorer) -
 /// train fold, score on each test fold.
 ///
 /// If the data needs preprocessing, use [`cross_validate_pipeline`].
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// let x = Array2::from_shape_fn((100, 1), |(row, _)| row as f64);
+/// let y = x.mapv(|value| 3.0 * value + 1.0);
+/// let data = EncodedData::new(x, y)?;
+///
+/// let model = LinearModelSpec::regressor().build()?;
+/// let folds = KFold::new(5).with_shuffle(42).splits(data.num_rows());
+/// let cv = cross_validate(&model, &data, &folds, &*scorer("r2")?)?;
+/// assert_eq!(cv.scores.len(), 5);
+/// assert!(cv.mean > 0.999 && cv.std < 0.001);
+///
+/// // A loss is reported negated, so that higher is always better.
+/// let cv = cross_validate(&model, &data, &folds, &*scorer("rmse")?)?;
+/// assert!(cv.mean <= 0.0);
+/// # Ok::<(), Error>(())
+/// ```
 pub fn cross_validate<E: Estimator>(
     spec: &E,
     data: &EncodedData,
@@ -236,6 +329,32 @@ pub fn cross_validate<E: Estimator>(
 /// Leakage-safe cross-validation: for each fold the whole pipeline —
 /// every preprocessing step and the model — is refitted on that fold's
 /// training rows only, then scored on its test rows.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// // 60 customers; the older half churned.
+/// let ages: Vec<f64> = (0..60).map(|row| 20.0 + row as f64).collect();
+/// let cities: Vec<&str> = (0..60).map(|row| if row % 2 == 0 { "Oslo" } else { "Rome" }).collect();
+/// let churned: Vec<i64> = (0..60).map(|row| (row >= 30) as i64).collect();
+/// let table = Table::new(vec![
+///     ("age", Column::floats(&ages)),
+///     ("city", Column::texts(&cities)),
+///     ("churned", Column::ints(&churned)),
+/// ])?;
+/// let data = ModelData::new(&table, ModelSpec::new(&["age", "city"], &["churned"]))?;
+///
+/// let pre = ColumnTransformer::empty()
+///     .with_branch("num", StandardScaler::new(), &["age"])
+///     .with_branch("cat", OneHotEncoder::new(), &["city"]);
+/// let pipe = Pipeline::new(vec![Box::new(pre)], Box::new(RandomForestSpec::default().n_trees(20).build()?));
+///
+/// let folds = StratifiedKFold::new(5).with_shuffle(42).splits(&data.y()?, data.num_rows());
+/// let cv = cross_validate_pipeline(&pipe, &data, &folds, &*scorer("accuracy")?)?;
+/// println!("accuracy: {:.3} ± {:.3}", cv.mean, cv.std);
+/// assert!(cv.mean > 0.9);
+/// # Ok::<(), Error>(())
+/// ```
 pub fn cross_validate_pipeline(
     pipe: &Pipeline,
     data: &ModelData,
@@ -258,14 +377,33 @@ pub fn cross_validate_pipeline(
 
 /// Parameter name → candidate values. For pipelines, `model__n_trees`
 /// reaches the model and `branch__param` a preprocessing branch.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let grid = ParamGrid::from([
+///     ("model__max_depth".to_string(), vec![3.into(), 6.into()]),
+///     ("num__strategy".to_string(), vec!["mean".into(), "median".into()]),
+/// ]);
+/// assert_eq!(grid.len(), 2); // two parameters: four combinations to try
+/// ```
 pub type ParamGrid = HashMap<String, Vec<ParamValue>>;
 
 /// One choice of value for every parameter in a grid.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let chosen = Params::from([("max_depth".to_string(), ParamValue::Int(3))]);
+/// assert_eq!(chosen["max_depth"], ParamValue::Int(3));
+/// ```
 pub type Params = HashMap<String, ParamValue>;
 
+/// What a grid search found. See [`grid_search`] for an example.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct GridSearchResult {
+    /// The combination with the highest mean score (the first, on ties).
     pub best_params: Params,
     /// Mean cross-validated score of the best combination (higher is better).
     pub best_score: f64,
@@ -313,6 +451,26 @@ fn search(grid: &ParamGrid, evaluate: impl Fn(&Params) -> Result<f64>) -> Result
 /// combination and keep the best.
 ///
 /// If the data needs preprocessing, use [`grid_search_pipeline`].
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// // The target follows a curve, so deeper trees fit it better.
+/// let x = Array2::from_shape_fn((300, 1), |(row, _)| row as f64 / 30.0);
+/// let y = x.mapv(f64::sin);
+/// let data = EncodedData::new(x, y)?;
+///
+/// let model = GradientBoostingSpec::regressor().n_rounds(30).build()?;
+/// let grid = ParamGrid::from([("max_depth".to_string(), vec![1.into(), 4.into()])]);
+/// let folds = KFold::new(3).with_shuffle(42).splits(data.num_rows());
+/// let result = grid_search(&model, &grid, &data, &folds, &*scorer("r2")?)?;
+///
+/// assert_eq!(result.best_params["max_depth"], ParamValue::Int(4));
+/// assert_eq!(result.all_scores.len(), 2);
+/// println!("best R²: {:.3}", result.best_score);
+/// # Ok::<(), Error>(())
+/// ```
 pub fn grid_search<E: Estimator + Clone>(
     spec: &E,
     param_grid: &ParamGrid,
@@ -331,6 +489,30 @@ pub fn grid_search<E: Estimator + Clone>(
 
 /// Leakage-safe grid search: every parameter combination is scored by
 /// [`cross_validate_pipeline`].
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// // 60 customers; the older half churned. Some ages are missing.
+/// let ages = (0..60).map(|row| if row % 7 == 0 { None } else { Some(20.0 + row as f64) }).collect();
+/// let churned: Vec<i64> = (0..60).map(|row| (row >= 30) as i64).collect();
+/// let table = Table::new(vec![("age", Column::Float(ages)), ("churned", Column::ints(&churned))])?;
+/// let data = ModelData::new(&table, ModelSpec::new(&["age"], &["churned"]))?;
+///
+/// let pre = ColumnTransformer::empty().with_branch("num", Imputer::new(ImputeStrategy::Mean), &["age"]);
+/// let pipe = Pipeline::new(vec![Box::new(pre)], Box::new(RandomForestSpec::default().n_trees(10).build()?));
+///
+/// // `model__` reaches the model; `num__` reaches the branch named "num".
+/// let grid = ParamGrid::from([
+///     ("model__max_depth".to_string(), vec![1.into(), 3.into()]),
+///     ("num__strategy".to_string(), vec!["mean".into(), "median".into()]),
+/// ]);
+/// let folds = KFold::new(3).with_shuffle(42).splits(data.num_rows());
+/// let result = grid_search_pipeline(&pipe, &grid, &data, &folds, &*scorer("accuracy")?)?;
+/// assert_eq!(result.all_scores.len(), 4);
+/// println!("best: {:?} with accuracy {:.3}", result.best_params, result.best_score);
+/// # Ok::<(), Error>(())
+/// ```
 pub fn grid_search_pipeline(
     pipe: &Pipeline,
     param_grid: &ParamGrid,

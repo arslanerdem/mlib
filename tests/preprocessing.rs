@@ -58,11 +58,8 @@ fn all_null_columns_are_rejected_at_fit() {
 
 #[test]
 fn scaler_standardises_and_maps_constant_columns_to_zero() {
-    let table = Table::new(vec![
-        ("x", Column::floats(&[1.0, 2.0, 3.0])),
-        ("constant", Column::ints(&[7, 7, 7])),
-    ])
-    .unwrap();
+    let table =
+        Table::new(vec![("x", Column::floats(&[1.0, 2.0, 3.0])), ("constant", Column::ints(&[7, 7, 7]))]).unwrap();
     let out = StandardScaler::new().fit_transform(&table).unwrap();
     let Column::Float(x) = out.column("x").unwrap() else { panic!() };
     let std = (2.0f64 / 3.0).sqrt();
@@ -78,8 +75,7 @@ fn one_hot_encodes_unseen_categories_as_all_zeros() {
     assert_eq!(out.schema().names(), ["city=Oslo", "city=Paris", "city=Rome"]);
     assert_eq!(out.column("city=Paris").unwrap(), &Column::floats(&[1.0, 0.0, 1.0, 0.0]));
 
-    let new = Table::new(vec![("city", Column::Text(vec![Some("Tokyo".into()), None, Some("Rome".into())]))])
-        .unwrap();
+    let new = Table::new(vec![("city", Column::Text(vec![Some("Tokyo".into()), None, Some("Rome".into())]))]).unwrap();
     let encoded = encoder.transform(&new).unwrap();
     assert_eq!(encoded.schema().names(), out.schema().names());
     assert_eq!(encoded.column("city=Oslo").unwrap(), &Column::floats(&[0.0, 0.0, 0.0]));
@@ -138,4 +134,95 @@ fn column_transformer_routes_columns_and_tracks_features() {
     // A missing routed column is a schema mismatch.
     let without_city = table().select(&["age", "rooms"]).unwrap();
     assert!(matches!(pre.transform(&without_city), Err(Error::SchemaMismatch(_))));
+}
+
+fn table_with_missing_labels() -> Table {
+    let text = |values: &[Option<&str>]| Column::Text(values.iter().map(|value| value.map(str::to_string)).collect());
+    Table::new(vec![
+        ("city", text(&[Some("Rome"), None, Some("Oslo"), Some("Rome"), Some("Oslo")])),
+        ("colour", text(&[Some("red"), Some("blue"), None, Some("red"), None])),
+        ("owner", Column::Bool(vec![Some(true), None, Some(false), Some(true), Some(true)])),
+        ("age", Column::Float(vec![Some(10.0), None, Some(30.0), Some(20.0), Some(5.0)])),
+    ])
+    .unwrap()
+    .with_categorical(&["colour"])
+    .unwrap()
+}
+
+#[test]
+fn categorical_imputer_fills_with_the_most_frequent_label() {
+    let table = table_with_missing_labels();
+    let mut imputer = CategoricalImputer::most_frequent();
+    let out = imputer.fit_transform(&table).unwrap();
+
+    // "Oslo" and "Rome" are equally frequent: the one that sorts first wins.
+    assert_eq!(out.column("city").unwrap(), &Column::texts(&["Rome", "Oslo", "Oslo", "Rome", "Oslo"]));
+    assert_eq!(
+        out.column("owner").unwrap(),
+        &Column::Bool(vec![Some(true), Some(true), Some(false), Some(true), Some(true)])
+    );
+    // A categorical column stays categorical, a numeric one is left alone.
+    let colour = out.column("colour").unwrap();
+    assert_eq!(colour.data_type(), DataType::Categorical);
+    assert_eq!((0..5).map(|i| colour.get_string(i).unwrap()).collect::<Vec<_>>(), ["red", "blue", "red", "red", "red"]);
+    assert_eq!(out.column("age"), table.column("age"));
+
+    // New data is filled with the *training* label, not its own most frequent one.
+    let new = table.take_rows(&[1, 1, 2]);
+    assert_eq!(imputer.transform(&new).unwrap().column("city").unwrap(), &Column::texts(&["Oslo", "Oslo", "Oslo"]));
+    assert_eq!(imputer.fill_values()["colour"], "red");
+}
+
+#[test]
+fn categorical_imputer_fills_with_a_chosen_label() {
+    let table = table_with_missing_labels().select(&["city", "colour"]).unwrap();
+    let out = CategoricalImputer::constant("missing").fit_transform(&table).unwrap();
+    assert_eq!(out.column("city").unwrap(), &Column::texts(&["Rome", "missing", "Oslo", "Rome", "Oslo"]));
+    // The new label joins the categorical column's categories.
+    assert_eq!(out.column("colour").unwrap().get_string(2).unwrap(), "missing");
+    assert_eq!(out.column("colour").unwrap().null_count(), 0);
+
+    // The encoder then gives "missing" a feature of its own.
+    let mut encoder = OneHotEncoder::new();
+    encoder.fit(&out).unwrap();
+    assert!(encoder.categories()["city"].contains(&"missing".to_string()));
+}
+
+#[test]
+fn categorical_imputer_reports_what_it_cannot_fill() {
+    let table = table_with_missing_labels();
+    // A true/false column cannot take an arbitrary label.
+    assert!(CategoricalImputer::constant("missing").fit(&table).is_err());
+    // Nothing to learn from.
+    let empty = Table::new(vec![("city", Column::Text(vec![None, None]))]).unwrap();
+    assert!(CategoricalImputer::most_frequent().fit(&empty).is_err());
+    assert!(matches!(CategoricalImputer::most_frequent().transform(&table), Err(Error::NotFitted)));
+
+    let mut imputer = CategoricalImputer::most_frequent();
+    imputer.fit(&table).unwrap();
+    assert!(imputer.transform(&table.select(&["city", "age"]).unwrap()).is_err());
+
+    // Reachable by name, for grid search.
+    imputer.set_param("fill_value", &ParamValue::from("unknown")).unwrap();
+    imputer.set_param("strategy", &ParamValue::from("most_frequent")).unwrap();
+    assert!(imputer.set_param("strategy", &ParamValue::from("mean")).is_err());
+    assert!(imputer.set_param("no_such_param", &ParamValue::Int(1)).is_err());
+}
+
+#[test]
+fn every_transformer_passes_the_conformance_battery() {
+    use mlib::testing::check_transformer;
+    check_transformer(&Imputer::new(ImputeStrategy::Median));
+    check_transformer(&CategoricalImputer::most_frequent());
+    check_transformer(&CategoricalImputer::constant("missing"));
+    check_transformer(&StandardScaler::new());
+    check_transformer(&OneHotEncoder::new());
+    check_transformer(&Chain::new(vec![Box::new(Imputer::new(ImputeStrategy::Mean)), Box::new(StandardScaler::new())]));
+    check_transformer(
+        &ColumnTransformer::empty().with_branch("num", StandardScaler::new(), &["height", "rooms"]).with_branch(
+            "cat",
+            OneHotEncoder::new(),
+            &["city"],
+        ),
+    );
 }

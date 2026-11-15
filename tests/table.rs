@@ -75,12 +75,6 @@ fn columns_must_have_equal_lengths_and_distinct_names() {
 fn model_data_checks_columns_and_target_types() {
     let table = table();
     assert!(ModelData::new(&table, ModelSpec::new(&["age"], &["member"])).is_ok());
-    assert!(matches!(
-        ModelData::new(&table, ModelSpec::new(&["missing"], &["member"])),
-        Err(Error::ColumnNotFound(_))
-    ));
-    assert!(matches!(
-        ModelData::new(&table, ModelSpec::new(&["age"], &["city"])),
-        Err(Error::TypeMismatch { .. })
-    ));
+    assert!(matches!(ModelData::new(&table, ModelSpec::new(&["missing"], &["member"])), Err(Error::ColumnNotFound(_))));
+    assert!(matches!(ModelData::new(&table, ModelSpec::new(&["age"], &["city"])), Err(Error::TypeMismatch { .. })));
 }

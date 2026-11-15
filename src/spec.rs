@@ -10,10 +10,22 @@ use std::collections::HashMap;
 
 /// Which columns are x's, y's, and roles — by name. One table can feed
 /// many specs.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let spec = ModelSpec::new(&["age", "income"], &["churned"])
+///     .with_weights("exposure")
+///     .with_groups("household");
+/// assert_eq!(spec.x_columns, ["age", "income"]);
+/// assert_eq!(spec.weight_column.as_deref(), Some("exposure"));
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelSpec {
+    /// The inputs, in the order the model will see them.
     pub x_columns: Vec<String>,
+    /// The targets. Several are allowed.
     pub y_columns: Vec<String>,
     /// Per-row sample weight.
     pub weight_column: Option<String>,
@@ -24,6 +36,7 @@ pub struct ModelSpec {
 }
 
 impl ModelSpec {
+    /// Name the input (x) and target (y) columns.
     pub fn new(x: &[&str], y: &[&str]) -> ModelSpec {
         ModelSpec {
             x_columns: x.iter().map(|name| name.to_string()).collect(),
@@ -34,16 +47,19 @@ impl ModelSpec {
         }
     }
 
+    /// Use a column as per-row sample weights.
     pub fn with_weights(mut self, column: &str) -> ModelSpec {
         self.weight_column = Some(column.to_string());
         self
     }
 
+    /// Name the row identifier, kept in the saved model for reference.
     pub fn with_id(mut self, column: &str) -> ModelSpec {
         self.id_column = Some(column.to_string());
         self
     }
 
+    /// Use a column as group ids, for `GroupKFold`.
     pub fn with_groups(mut self, column: &str) -> ModelSpec {
         self.group_column = Some(column.to_string());
         self
@@ -51,6 +67,25 @@ impl ModelSpec {
 }
 
 /// A view, not a copy: borrows the table and carries the spec.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let table = Table::new(vec![
+///     ("age", Column::floats(&[34.0, 51.0, 29.0])),
+///     ("visits", Column::ints(&[2, 7, 1])),
+///     ("churned", Column::ints(&[0, 1, 0])),
+/// ])?;
+/// let data = ModelData::new(&table, ModelSpec::new(&["age", "visits"], &["churned"]))?;
+/// assert_eq!(data.num_rows(), 3);
+/// assert_eq!(data.y()?, [0.0, 1.0, 0.0]);
+/// assert_eq!(data.x_table().schema().names(), ["age", "visits"]);
+///
+/// // A column that does not exist is caught here, not at fit time.
+/// let typo = ModelSpec::new(&["agee"], &["churned"]);
+/// assert!(ModelData::new(&table, typo).is_err());
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug)]
 pub struct ModelData<'a> {
     pub(crate) table: &'a Table,
@@ -90,6 +125,7 @@ impl<'a> ModelData<'a> {
         self.table.column(name).expect("ModelData::new verified this column exists")
     }
 
+    /// Number of rows in the table.
     pub fn num_rows(&self) -> usize {
         self.table.num_rows()
     }
@@ -145,9 +181,11 @@ impl<'a> ModelData<'a> {
     /// One group id per row, from the group column, for `GroupKFold`.
     /// Rows with the same value (of any type) share an id.
     pub fn groups(&self) -> Result<Vec<i64>> {
-        let name = self.spec.group_column.as_ref().ok_or_else(|| {
-            Error::InvalidSpec("no group column set — use ModelSpec::with_groups".to_string())
-        })?;
+        let name = self
+            .spec
+            .group_column
+            .as_ref()
+            .ok_or_else(|| Error::InvalidSpec("no group column set — use ModelSpec::with_groups".to_string()))?;
         let column = self.checked_column(name);
         let mut ids: HashMap<Option<String>, i64> = HashMap::new();
         Ok((0..self.num_rows())

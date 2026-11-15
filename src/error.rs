@@ -4,8 +4,34 @@ use crate::table::DataType;
 use std::fmt;
 
 /// Shorthand for `std::result::Result<T, mlib::Error>`.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// fn first_rows(path: &str) -> mlib::Result<Table> {
+///     Ok(Table::from_csv(path)?.take_rows(&[0, 1, 2]))
+/// }
+/// assert!(first_rows("no-such-file.csv").is_err());
+/// ```
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Everything that can go wrong, with a message that says what to do
+/// about it where possible.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let table = Table::new(vec![("age", Column::floats(&[34.0, 51.0]))])?;
+/// match table.require_column("income") {
+///     Err(Error::ColumnNotFound(name)) => assert_eq!(name, "income"),
+///     _ => panic!("expected a missing column"),
+/// }
+///
+/// // Errors print as plain sentences.
+/// let error = RandomForestSpec::default().n_trees(0).build().unwrap_err();
+/// assert!(error.to_string().starts_with("invalid spec"));
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -13,7 +39,14 @@ pub enum Error {
     ColumnNotFound(String),
 
     /// A column has the wrong type for the operation.
-    TypeMismatch { column: String, expected: DataType, found: DataType },
+    TypeMismatch {
+        /// The column's name.
+        column: String,
+        /// The type the operation needs.
+        expected: DataType,
+        /// The type the column has.
+        found: DataType,
+    },
 
     /// A spec failed validation (bad hyper-parameter or parameter name).
     InvalidSpec(String),
@@ -27,10 +60,20 @@ pub enum Error {
 
     /// The data has a shape the operation cannot consume
     /// (zero rows, zero features, row counts that disagree).
-    ShapeMismatch { expected: String, found: String },
+    ShapeMismatch {
+        /// What the operation needs, in words.
+        expected: String,
+        /// What it was given.
+        found: String,
+    },
 
     /// A saved artifact's format_version is unknown or unsupported.
-    UnsupportedVersion { version: u32, max_supported: u32 },
+    UnsupportedVersion {
+        /// The version written in the file.
+        version: u32,
+        /// The newest version this release reads.
+        max_supported: u32,
+    },
 
     /// The input does not match what the model was fitted on.
     SchemaMismatch(String),
@@ -63,10 +106,9 @@ impl fmt::Display for Error {
             Error::ShapeMismatch { expected, found } => {
                 write!(f, "shape mismatch: expected {expected}, found {found}")
             }
-            Error::UnsupportedVersion { version, max_supported } => write!(
-                f,
-                "unsupported model format version {version} (this library reads up to {max_supported})"
-            ),
+            Error::UnsupportedVersion { version, max_supported } => {
+                write!(f, "unsupported model format version {version} (this library reads up to {max_supported})")
+            }
             Error::SchemaMismatch(message) => write!(f, "schema mismatch: {message}"),
             Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::Csv(e) => write!(f, "CSV error: {e}"),

@@ -10,26 +10,59 @@
 //! - Two classes: the score is the log-odds of the second class.
 //! - More classes: one score per class; their softmax gives the
 //!   probabilities. Each round grows one tree per class.
+//! - Several class targets: each target has its scores as above, and
+//!   they are learned side by side in the same rounds.
 //!
-//! Two optional guards against overfitting: `subsample` grows each
-//! round's trees on a random part of the rows, and
-//! `early_stopping_rounds` holds some rows out and stops when the loss on
-//! them stops improving.
+//! Four optional guards against overfitting:
+//!
+//! - `subsample` grows each round's trees on a random part of the rows;
+//! - `feature_fraction` lets each round's trees use only a random part
+//!   of the features;
+//! - `l2_regularization` makes leaves with little data predict smaller
+//!   corrections;
+//! - `early_stopping_rounds` holds some rows out and stops when the loss
+//!   on them stops improving.
 //!
 //! The types follow the forest: [`GradientBoostingSpec`] → `build()` →
 //! [`ValidGradientBoostingSpec`] → `fit()` → [`FittedGradientBoosting`].
 
+use crate::classes;
 use crate::encoded::{rank_importances, EncodedData, Feature};
 use crate::error::{Error, Result};
 use crate::random::Rng;
+use crate::scores::{self, by_row, class_probabilities, expected_values, starting_score, Wanted};
 use crate::traits::{Estimator, Label, ParamValue, Predictor};
 use crate::tree::{self, BinnedFeatures, Targets, Task, Tree, TreeParams};
 use ndarray::Array2;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 
 /// Gradient boosting hyper-parameters. `GradientBoostingSpec::default()`
 /// trains a classifier out of the box.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let spec = GradientBoostingSpec::default()
+///     .n_rounds(500)
+///     .learning_rate(0.05)
+///     .max_depth(Some(4))
+///     .subsample(0.8)                  // each round sees a random 80% of the rows
+///     .feature_fraction(0.8)           // ... and a random 80% of the features
+///     .l2_regularization(1.0)          // small leaves predict smaller corrections
+///     .early_stopping_rounds(Some(20)) // stop 20 rounds after the best one
+///     .seed(42);
+/// let boosting = spec.build()?; // checked, ready to fit
+/// assert_eq!(boosting.spec().n_rounds, 500);
+///
+/// // A setting that makes no sense is caught here, not during the fit.
+/// assert!(GradientBoostingSpec::default().learning_rate(0.0).build().is_err());
+///
+/// let regressor = GradientBoostingSpec::regressor().build()?;
+/// assert_eq!(regressor.spec().task, Task::Regression);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GradientBoostingSpec {
@@ -50,6 +83,20 @@ pub struct GradientBoostingSpec {
     /// data, which usually reduces overfitting and speeds up fitting.
     /// Default 1.0 (all rows).
     pub subsample: f64,
+    /// The fraction of the features each round's trees may split on, in
+    /// (0, 1]. Below 1, every round sees a different random part of the
+    /// features, so no single strong feature dominates every tree; it
+    /// also speeds up fitting. At least one feature is always kept.
+    /// Default 1.0 (all features).
+    #[serde(default = "all")]
+    pub feature_fraction: f64,
+    /// L2 regularisation, 0 or more. A leaf's correction is its rows'
+    /// total error divided by their total weight; this number is added to
+    /// that weight (and likewise when a split is scored). A leaf with few
+    /// rows is then pulled towards zero, a leaf with many is barely
+    /// changed. Typical values are between 0.1 and 10. Default 0 (none).
+    #[serde(default)]
+    pub l2_regularization: f64,
     /// Stop when the loss on held-out rows has not improved for this many
     /// rounds, and keep the model from the best round. `None` (the
     /// default) always runs all `n_rounds`.
@@ -62,6 +109,12 @@ pub struct GradientBoostingSpec {
     pub seed: u64,
 }
 
+/// The value of a fraction that leaves nothing out: what a spec saved
+/// before `feature_fraction` existed should load with.
+fn all() -> f64 {
+    1.0
+}
+
 impl Default for GradientBoostingSpec {
     fn default() -> GradientBoostingSpec {
         GradientBoostingSpec {
@@ -71,6 +124,8 @@ impl Default for GradientBoostingSpec {
             max_depth: Some(6),
             min_samples_leaf: 20,
             subsample: 1.0,
+            feature_fraction: 1.0,
+            l2_regularization: 0.0,
             early_stopping_rounds: None,
             validation_fraction: 0.1,
             seed: 0,
@@ -89,46 +144,71 @@ impl GradientBoostingSpec {
         GradientBoostingSpec { task: Task::Regression, ..Default::default() }
     }
 
+    /// Classification or regression.
     pub fn task(mut self, task: Task) -> GradientBoostingSpec {
         self.task = task;
         self
     }
 
+    /// How many rounds of correction to run.
     pub fn n_rounds(mut self, n: usize) -> GradientBoostingSpec {
         self.n_rounds = n;
         self
     }
 
+    /// The fraction of each tree's correction that is kept, in (0, 1].
+    /// A smaller rate usually needs more rounds.
     pub fn learning_rate(mut self, rate: f64) -> GradientBoostingSpec {
         self.learning_rate = rate;
         self
     }
 
+    /// The most splits between the root and a leaf; `None` for no limit.
     pub fn max_depth(mut self, depth: Option<usize>) -> GradientBoostingSpec {
         self.max_depth = depth;
         self
     }
 
+    /// The fewest rows a leaf may hold.
     pub fn min_samples_leaf(mut self, n: usize) -> GradientBoostingSpec {
         self.min_samples_leaf = n;
         self
     }
 
+    /// The fraction of the rows each round's trees are grown on, in (0, 1].
     pub fn subsample(mut self, fraction: f64) -> GradientBoostingSpec {
         self.subsample = fraction;
         self
     }
 
+    /// The fraction of the features each round's trees may split on, in (0, 1].
+    pub fn feature_fraction(mut self, fraction: f64) -> GradientBoostingSpec {
+        self.feature_fraction = fraction;
+        self
+    }
+
+    /// L2 regularisation, 0 or more: leaves with little data predict
+    /// smaller corrections.
+    pub fn l2_regularization(mut self, l2: f64) -> GradientBoostingSpec {
+        self.l2_regularization = l2;
+        self
+    }
+
+    /// Stop when the loss on held-out rows has not improved for this
+    /// many rounds; `None` to always run every round.
     pub fn early_stopping_rounds(mut self, rounds: Option<usize>) -> GradientBoostingSpec {
         self.early_stopping_rounds = rounds;
         self
     }
 
+    /// The fraction of the rows held out for early stopping, in (0, 1).
     pub fn validation_fraction(mut self, fraction: f64) -> GradientBoostingSpec {
         self.validation_fraction = fraction;
         self
     }
 
+    /// The seed for all random choices. The same seed and data always
+    /// give the same model.
     pub fn seed(mut self, seed: u64) -> GradientBoostingSpec {
         self.seed = seed;
         self
@@ -152,6 +232,12 @@ impl GradientBoostingSpec {
         if !(self.subsample > 0.0 && self.subsample <= 1.0) {
             return invalid("subsample must be in (0, 1]");
         }
+        if !(self.feature_fraction > 0.0 && self.feature_fraction <= 1.0) {
+            return invalid("feature_fraction must be in (0, 1]");
+        }
+        if !(self.l2_regularization >= 0.0 && self.l2_regularization.is_finite()) {
+            return invalid("l2_regularization must be 0 or more");
+        }
         if self.early_stopping_rounds == Some(0) {
             return invalid("early_stopping_rounds must be at least 1 (or None to switch it off)");
         }
@@ -164,6 +250,25 @@ impl GradientBoostingSpec {
 
 /// A `GradientBoostingSpec` that passed validation. Create one with
 /// [`GradientBoostingSpec::build`].
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// // 400 rows; the target is a curve in the first feature plus the second.
+/// let x = Array2::from_shape_fn((400, 2), |(row, feature)| ((row * (feature + 3)) % 50) as f64);
+/// let y = Array2::from_shape_fn((400, 1), |(row, _)| (x[[row, 0]] / 8.0).sin() + x[[row, 1]] / 50.0);
+/// let data = EncodedData::new(x, y)?;
+///
+/// let mut boosting = GradientBoostingSpec::regressor().n_rounds(50).build()?;
+/// let fitted = boosting.fit(&data)?;
+/// assert!(fitted.score(&data)? > 0.9);
+///
+/// // Changing a setting by name checks it again.
+/// boosting.set_param("learning_rate", &0.3.into())?;
+/// assert!(boosting.set_param("learning_rate", &(-1.0).into()).is_err());
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidGradientBoostingSpec {
     spec: GradientBoostingSpec,
@@ -185,22 +290,7 @@ impl Estimator for ValidGradientBoostingSpec {
         let n_rows = data.num_rows();
         let sample_weights = data.weights.clone().unwrap_or_else(|| vec![1.0; n_rows]);
 
-        // `wanted[s][row]` is what score `s` should end up predicting for
-        // the row: the value of target `s` (regression), or 1 when the
-        // row belongs to the score's class and 0 when it does not.
-        let (wanted, classes): (Vec<Vec<f64>>, Vec<Label>) = match spec.task {
-            Task::Regression => (data.y.columns().into_iter().map(|target| target.to_vec()).collect(), Vec::new()),
-            Task::Classification => {
-                let (classes, class_of_row) = tree::class_indices(&tree::class_labels(data)?);
-                if classes.len() < 2 {
-                    return Err(Error::InvalidData("a classifier needs at least two classes in y".to_string()));
-                }
-                // Two classes share a single score, for the second class.
-                let scored_classes = if classes.len() == 2 { 1..2 } else { 0..classes.len() as u32 };
-                let is_class = |class| class_of_row.iter().map(|&c| if c == class { 1.0 } else { 0.0 }).collect();
-                (scored_classes.map(is_class).collect(), classes)
-            }
-        };
+        let Wanted { values: wanted, groups, classes, classes_per_target } = Wanted::new(spec.task, data)?;
 
         // With early stopping, some rows are held out: no tree is grown on
         // them, and the loss on them tells when to stop.
@@ -209,8 +299,11 @@ impl Estimator for ValidGradientBoostingSpec {
             Some(_) => (0..n_rows).map(|_| rng.chance(spec.validation_fraction)).collect(),
             None => vec![false; n_rows],
         };
-        let training_weights: Vec<f64> =
-            sample_weights.iter().zip(&is_held_out).map(|(&weight, &held_out)| if held_out { 0.0 } else { weight }).collect();
+        let training_weights: Vec<f64> = sample_weights
+            .iter()
+            .zip(&is_held_out)
+            .map(|(&weight, &held_out)| if held_out { 0.0 } else { weight })
+            .collect();
         let total_weight: f64 = training_weights.iter().sum();
         let held_out_weight: f64 = sample_weights.iter().sum::<f64>() - total_weight;
         if total_weight <= 0.0 || (spec.early_stopping_rounds.is_some() && held_out_weight <= 0.0) {
@@ -221,30 +314,37 @@ impl Estimator for ValidGradientBoostingSpec {
 
         // Every row starts from the same score: the one that fits the
         // training data best without looking at any feature.
-        let initial_scores: Vec<f64> = wanted
+        let starting_score_of = |wanted: &Vec<f64>, group_size: usize| {
+            let mean = wanted.iter().zip(&training_weights).map(|(w, weight)| w * weight).sum::<f64>() / total_weight;
+            starting_score(spec.task, group_size, mean)
+        };
+        let initial_scores: Vec<f64> = groups
             .iter()
-            .map(|wanted| {
-                let mean = wanted.iter().zip(&training_weights).map(|(w, weight)| w * weight).sum::<f64>() / total_weight;
-                starting_score(spec.task, classes.len(), mean)
-            })
+            .flat_map(|group| wanted[group.clone()].iter().map(|wanted| starting_score_of(wanted, group.len())))
             .collect();
         let mut scores: Vec<Vec<f64>> = initial_scores.iter().map(|&score| vec![score; n_rows]).collect();
 
         let binned = BinnedFeatures::new(&data.x);
-        let params = TreeParams {
+        let all_features: Vec<usize> = (0..data.num_features()).collect();
+        // Rounded up, so that a small fraction of a few features still keeps one.
+        let n_features_per_round = (spec.feature_fraction * all_features.len() as f64).ceil() as usize;
+        let mut params = TreeParams {
             max_depth: spec.max_depth,
             min_samples_leaf: spec.min_samples_leaf,
             features_per_split: data.num_features(),
             bootstrap: false,
+            features: all_features.clone(),
+            l2: spec.l2_regularization,
             parallel: true,
         };
 
         let mut trees: Vec<Vec<Tree>> = vec![Vec::new(); wanted.len()];
-        let mut tree_importances = Vec::new();
+        // `gains[s]` holds, round after round, each feature's gain in score `s`'s tree.
+        let mut gains: Vec<Vec<Vec<f64>>> = vec![Vec::new(); wanted.len()];
         let mut validation_losses = Vec::new();
         let mut best_round = 0;
         for round in 0..spec.n_rounds {
-            let expected = expected_values(spec.task, &scores);
+            let expected = expected_values(spec.task, &scores, &groups);
 
             // The rows this round's trees are grown on.
             let round_weights: Vec<f64> = if spec.subsample < 1.0 {
@@ -253,6 +353,15 @@ impl Estimator for ValidGradientBoostingSpec {
                 training_weights.clone()
             };
 
+            // The features this round's trees may split on.
+            if n_features_per_round < all_features.len() {
+                let mut shuffled = all_features.clone();
+                rng.shuffle(&mut shuffled);
+                shuffled.truncate(n_features_per_round);
+                shuffled.sort_unstable();
+                params.features = shuffled;
+            }
+
             // One tree per score. They do not depend on each other, so
             // they are grown in parallel.
             let grown: Vec<(Tree, Vec<f64>)> = (0..wanted.len())
@@ -260,26 +369,26 @@ impl Estimator for ValidGradientBoostingSpec {
                 .map(|s| {
                     let (corrections, weights) = newton_steps(spec.task, &wanted[s], &expected[s], &round_weights);
                     let targets = Targets::single(corrections);
-                    // The tree itself draws nothing at random: it uses every row it is given and every feature.
-                    let (mut tree, importances) =
-                        tree::grow_tree(&binned, &targets, Some(&weights), &params, Rng::new(0, 0));
+                    // The tree itself draws nothing at random: it uses every row and feature it is given.
+                    let (mut tree, gains) = tree::grow_tree(&binned, &targets, Some(&weights), &params, Rng::new(0, 0));
                     tree.leaf_values.iter_mut().for_each(|value| *value *= spec.learning_rate);
-                    (tree, importances)
+                    (tree, gains)
                 })
                 .collect();
 
-            for (s, (tree, importances)) in grown.into_iter().enumerate() {
+            for (s, (tree, tree_gains)) in grown.into_iter().enumerate() {
                 let corrections = tree::sum_tree_predictions(std::slice::from_ref(&tree), &data.x);
                 for (score, correction) in scores[s].iter_mut().zip(corrections) {
                     *score += correction;
                 }
                 trees[s].push(tree);
-                tree_importances.push(importances);
+                gains[s].push(tree_gains);
             }
 
             if let Some(patience) = spec.early_stopping_rounds {
-                let expected = expected_values(spec.task, &scores);
-                validation_losses.push(held_out_loss(spec.task, &wanted, &expected, &sample_weights, &is_held_out));
+                let expected = expected_values(spec.task, &scores, &groups);
+                let loss = held_out_loss(spec.task, &wanted, &expected, &groups, &sample_weights, &is_held_out);
+                validation_losses.push(loss);
                 if validation_losses[round] < validation_losses[best_round] {
                     best_round = round;
                 }
@@ -291,7 +400,7 @@ impl Estimator for ValidGradientBoostingSpec {
         if spec.early_stopping_rounds.is_some() {
             // Keep the model as it was after its best round.
             trees.iter_mut().for_each(|trees| trees.truncate(best_round + 1));
-            tree_importances.truncate((best_round + 1) * wanted.len());
+            gains.iter_mut().for_each(|gains| gains.truncate(best_round + 1));
         }
 
         Ok(FittedGradientBoosting {
@@ -299,7 +408,8 @@ impl Estimator for ValidGradientBoostingSpec {
             trees,
             initial_scores,
             classes,
-            feature_importances: tree::average_importances(&tree_importances, data.num_features()),
+            classes_per_target,
+            feature_importances: importances(spec.task, &gains, data.num_features()),
             features: data.features.clone(),
             n_features: data.num_features(),
             validation_losses,
@@ -307,7 +417,8 @@ impl Estimator for ValidGradientBoostingSpec {
     }
 
     /// Parameters: `n_rounds`, `min_samples_leaf`, `seed` (Int);
-    /// `learning_rate`, `subsample`, `validation_fraction` (Float);
+    /// `learning_rate`, `subsample`, `feature_fraction`,
+    /// `l2_regularization`, `validation_fraction` (Float);
     /// `max_depth` and `early_stopping_rounds` (Int, or Text "none").
     fn set_param(&mut self, name: &str, value: &ParamValue) -> Result<()> {
         let invalid = || Error::InvalidSpec(format!("invalid value for {name}: {value:?}"));
@@ -330,6 +441,8 @@ impl Estimator for ValidGradientBoostingSpec {
             "seed" => spec.seed = as_count()? as u64,
             "learning_rate" => spec.learning_rate = as_fraction()?,
             "subsample" => spec.subsample = as_fraction()?,
+            "feature_fraction" => spec.feature_fraction = as_fraction()?,
+            "l2_regularization" => spec.l2_regularization = as_fraction()?,
             "validation_fraction" => spec.validation_fraction = as_fraction()?,
             "max_depth" => spec.max_depth = as_optional_count()?,
             "early_stopping_rounds" => spec.early_stopping_rounds = as_optional_count()?,
@@ -340,43 +453,21 @@ impl Estimator for ValidGradientBoostingSpec {
     }
 }
 
-/// The score that predicts `mean` for every row, where `mean` is the
-/// average of what the score should predict.
-fn starting_score(task: Task, n_classes: usize, mean: f64) -> f64 {
-    // Keeps the logarithms finite when a class has no weight at all.
-    let share = mean.clamp(1e-12, 1.0 - 1e-12);
+/// A model's feature importances from its trees' gains (`[score][round][feature]`).
+///
+/// A tree's gain is how much its splits lowered the loss, so the early
+/// trees, which do most of the work, count for most — and a late tree
+/// that polishes details counts for little. A classifier's scores share
+/// one loss, so all their trees are simply added up. Regression targets
+/// may be in different units: each target's gains are turned into shares
+/// first, and the targets' shares are averaged.
+fn importances(task: Task, gains: &[Vec<Vec<f64>>], n_features: usize) -> Vec<f64> {
+    let of_score = |rounds: &Vec<Vec<f64>>| tree::sum_per_feature(rounds, n_features);
     match task {
-        Task::Regression => mean,
-        Task::Classification if n_classes == 2 => (share / (1.0 - share)).ln(),
-        Task::Classification => share.ln(),
-    }
-}
-
-/// What the current scores predict, laid out like the scores
-/// (`[score][row]`): the value for regression, a probability otherwise.
-fn expected_values(task: Task, scores: &[Vec<f64>]) -> Vec<Vec<f64>> {
-    match (task, scores.len()) {
-        (Task::Regression, _) => scores.to_vec(),
-        // Two classes: the sigmoid of the single score.
-        (Task::Classification, 1) => {
-            vec![scores[0].par_iter().map(|score| 1.0 / (1.0 + (-score).exp())).collect()]
-        }
-        // More classes: the softmax of each row's scores.
-        (Task::Classification, _) => {
-            // Per row: the largest score, and the sum of exp(score - largest).
-            // Subtracting the largest score first keeps `exp` from overflowing.
-            let (largest, total): (Vec<f64>, Vec<f64>) = (0..scores[0].len())
-                .into_par_iter()
-                .map(|row| {
-                    let largest = scores.iter().map(|class| class[row]).fold(f64::MIN, f64::max);
-                    (largest, scores.iter().map(|class| (class[row] - largest).exp()).sum::<f64>())
-                })
-                .unzip();
-            let softmax = |class: &Vec<f64>| {
-                let rows = class.par_iter().zip(&largest).zip(&total);
-                rows.map(|((score, largest), total)| (score - largest).exp() / total).collect()
-            };
-            scores.iter().map(softmax).collect()
+        Task::Classification => tree::as_shares(tree::sum_per_feature(gains.iter().flatten(), n_features)),
+        Task::Regression => {
+            let shares: Vec<Vec<f64>> = gains.iter().map(|rounds| tree::as_shares(of_score(rounds))).collect();
+            tree::as_shares(tree::sum_per_feature(&shares, n_features))
         }
     }
 }
@@ -406,20 +497,23 @@ fn newton_steps(task: Task, wanted: &[f64], expected: &[f64], sample_weights: &[
 }
 
 /// The model's loss on the held-out rows: mean squared error for
-/// regression, log loss for classification. `wanted` and `expected` are
-/// laid out `[score][row]`.
+/// regression, log loss for classification, added up over the targets.
+/// `wanted` and `expected` are laid out `[score][row]`; `groups` says
+/// which scores belong to which target.
 fn held_out_loss(
     task: Task,
     wanted: &[Vec<f64>],
     expected: &[Vec<f64>],
+    groups: &[Range<usize>],
     sample_weights: &[f64],
     is_held_out: &[bool],
 ) -> f64 {
     // Keeps the logarithm finite when a probability rounds to exactly 0.
     let log = |probability: f64| probability.max(1e-15).ln();
-    let loss_of_row = |row: usize| -> f64 {
+    let loss_of_target = |row: usize, group: &Range<usize>| -> f64 {
+        let (wanted, expected) = (&wanted[group.clone()], &expected[group.clone()]);
         let pairs = wanted.iter().zip(expected).map(|(wanted, expected)| (wanted[row], expected[row]));
-        match (task, wanted.len()) {
+        match (task, group.len()) {
             (Task::Regression, _) => pairs.map(|(wanted, expected)| (wanted - expected).powi(2)).sum(),
             // Two classes share one score: `expected` is the second class's probability.
             (Task::Classification, 1) => {
@@ -429,6 +523,7 @@ fn held_out_loss(
             (Task::Classification, _) => pairs.map(|(wanted, p)| -wanted * log(p)).sum(),
         }
     };
+    let loss_of_row = |row: usize| -> f64 { groups.iter().map(|group| loss_of_target(row, group)).sum() };
     let held_out = (0..is_held_out.len()).filter(|&row| is_held_out[row]);
     let (loss, weight) = held_out.fold((0.0, 0.0), |(loss, weight), row| {
         (loss + sample_weights[row] * loss_of_row(row), weight + sample_weights[row])
@@ -436,19 +531,46 @@ fn held_out_loss(
     loss / weight
 }
 
-/// Turn `[score][row]` lists into a (rows × scores) matrix.
-fn by_row(columns: &[Vec<f64>]) -> Array2<f64> {
-    Array2::from_shape_fn((columns[0].len(), columns.len()), |(row, column)| columns[column][row])
-}
-
 /// A trained boosted model: learned state only, no reference to the
 /// training data.
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// // 400 rows; the target is a curve in the first feature plus the second.
+/// let x = Array2::from_shape_fn((400, 2), |(row, feature)| ((row * (feature + 3)) % 50) as f64);
+/// let y = Array2::from_shape_fn((400, 1), |(row, _)| (x[[row, 0]] / 8.0).sin() + x[[row, 1]] / 50.0);
+/// let data = EncodedData::new(x, y)?;
+///
+/// let model = GradientBoostingSpec::regressor()
+///     .n_rounds(300)
+///     .early_stopping_rounds(Some(10))
+///     .seed(1)
+///     .build()?
+///     .fit(&data)?;
+///
+/// // The model keeps the rounds up to the best one on the held-out rows.
+/// assert!(model.n_rounds() <= 300);
+/// assert!(model.validation_losses().len() >= model.n_rounds());
+/// assert!(model.score(&data)? > 0.9);
+///
+/// // One score per target; every row starts from the target's mean.
+/// assert_eq!((model.n_scores(), model.n_features()), (1, 2));
+/// println!("starting score {:.3}", model.initial_scores()[0]);
+///
+/// // Every tree can be read, and the features ranked.
+/// assert!(model.tree(0, 0).depth() <= 6);
+/// assert_eq!(model.trees().count(), model.n_rounds());
+/// assert_eq!(model.ranked_importances()[0].0, "x0");
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FittedGradientBoosting {
     task: Task,
     /// `trees[s]` are the trees that build up score `s`, in the order
     /// they were grown. The learning rate is already folded into their
-    /// leaf values. Regression has one score per target; classification
+    /// leaf values. Regression has one score per target; a class target
     /// has one score for two classes, and one per class otherwise.
     trees: Vec<Vec<Tree>>,
     initial_scores: Vec<f64>,
@@ -459,6 +581,10 @@ pub struct FittedGradientBoosting {
     /// The held-out loss after each round, when early stopping was on.
     #[serde(default)]
     validation_losses: Vec<f64>,
+    /// How many classes each target has. Empty in a model saved before
+    /// classifiers took several targets: all classes are its one target's.
+    #[serde(default)]
+    classes_per_target: Vec<usize>,
 }
 
 impl FittedGradientBoosting {
@@ -467,8 +593,8 @@ impl FittedGradientBoosting {
         self.task
     }
 
-    /// How many scores the model keeps: one per regression target, one
-    /// for two classes, one per class otherwise.
+    /// How many scores the model keeps: one per regression target; for
+    /// a class target, one for two classes and one per class otherwise.
     pub fn n_scores(&self) -> usize {
         self.trees.len()
     }
@@ -503,13 +629,17 @@ impl FittedGradientBoosting {
         &self.initial_scores
     }
 
-    /// The class labels, sorted. Empty for regression.
+    /// The class labels, sorted: what the columns of `predict_proba`
+    /// stand for. With several targets, each target's classes follow the
+    /// previous target's (see `target_classes` for them one by one).
+    /// Empty for regression.
     pub fn classes(&self) -> &[Label] {
         &self.classes
     }
 
     /// How much each feature contributed: one number per feature, summing
-    /// to 1, in the order of `features()`.
+    /// to 1, in the order of `features()`. It is the feature's share of
+    /// the total improvement made by all the splits in all the trees.
     pub fn feature_importances(&self) -> &[f64] {
         &self.feature_importances
     }
@@ -519,6 +649,7 @@ impl FittedGradientBoosting {
         &self.features
     }
 
+    /// How many features the model was fitted on.
     pub fn n_features(&self) -> usize {
         self.n_features
     }
@@ -535,6 +666,11 @@ impl FittedGradientBoosting {
         Ok(self.trees.iter().zip(&self.initial_scores).map(score).collect())
     }
 
+    /// Which scores belong to which target.
+    fn score_groups(&self) -> Vec<Range<usize>> {
+        scores::score_groups(self.task, self.trees.len(), &self.classes_per_target)
+    }
+
     /// Features with their importance, most important first.
     pub fn ranked_importances(&self) -> Vec<(String, f64)> {
         rank_importances(&self.features, &self.feature_importances)
@@ -546,22 +682,17 @@ impl Predictor for FittedGradientBoosting {
     fn predict(&self, data: &EncodedData) -> Result<Array2<f64>> {
         match self.task {
             Task::Regression => Ok(by_row(&self.scores(data)?)),
-            Task::Classification => Ok(tree::most_probable_classes(&self.predict_proba(data)?, &self.classes)),
+            Task::Classification => {
+                Ok(classes::most_probable(&self.predict_proba(data)?, &self.classes, &self.classes_per_target))
+            }
         }
     }
 
     fn predict_proba(&self, data: &EncodedData) -> Result<Array2<f64>> {
         if self.task == Task::Regression {
-            return Err(Error::InvalidSpec(
-                "predict_proba needs a classifier; this model is a regressor".to_string(),
-            ));
+            return Err(Error::InvalidSpec("predict_proba needs a classifier; this model is a regressor".to_string()));
         }
-        let expected = expected_values(self.task, &self.scores(data)?);
-        Ok(match expected.as_slice() {
-            // Two classes: the single score gives the second class's probability.
-            [second] => by_row(&[second.iter().map(|p| 1.0 - p).collect(), second.clone()]),
-            classes => by_row(classes),
-        })
+        Ok(class_probabilities(&self.scores(data)?, &self.score_groups()))
     }
 
     fn score(&self, data: &EncodedData) -> Result<f64> {
@@ -570,5 +701,9 @@ impl Predictor for FittedGradientBoosting {
 
     fn feature_importances(&self) -> Option<Vec<f64>> {
         Some(self.feature_importances.clone())
+    }
+
+    fn target_classes(&self) -> Vec<Vec<Label>> {
+        classes::by_target(&self.classes, &self.classes_per_target)
     }
 }

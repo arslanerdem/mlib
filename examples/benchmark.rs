@@ -1,16 +1,18 @@
-//! Time forest training and prediction on synthetic data.
+//! Time forest, boosting or linear-model training and prediction on synthetic data.
 //!
-//! cargo run --release --example benchmark [rows] [features] [trees]
+//! cargo run --release --example benchmark [rows] [features] [trees] [forest|boosting|linear]
 
 use mlib::prelude::*;
 use mlib::random::Rng;
 use std::time::Instant;
 
 fn main() -> Result<(), Error> {
-    let mut args = std::env::args().skip(1).map(|arg| arg.parse::<usize>().expect("arguments are numbers"));
-    let n_rows = args.next().unwrap_or(100_000);
-    let n_features = args.next().unwrap_or(20);
-    let n_trees = args.next().unwrap_or(100);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let number = |position: usize, default: usize| -> usize {
+        args.get(position).map_or(default, |arg| arg.parse().expect("the first three arguments are numbers"))
+    };
+    let (n_rows, n_features, n_trees) = (number(0, 100_000), number(1, 20), number(2, 100));
+    let model_name = args.get(3).map_or("forest", |name| name.as_str());
 
     // Gaussian-ish features; the class depends non-linearly on the first five.
     let mut rng = Rng::new(1, 0);
@@ -25,16 +27,26 @@ fn main() -> Result<(), Error> {
     let test = data.take_rows(&(n_train..n_rows).collect::<Vec<_>>());
     println!("{n_train} training rows × {n_features} features, {n_trees} trees");
 
-    let forest = RandomForestSpec::default().n_trees(n_trees).seed(42).build()?;
     let start = Instant::now();
-    let model = forest.fit(&train)?;
+    let (model, n_nodes): (Box<dyn Predictor>, usize) = match model_name {
+        "boosting" => {
+            let model = GradientBoostingSpec::new().n_rounds(n_trees).build()?.fit(&train)?;
+            let n_nodes = model.trees().map(|tree| tree.n_nodes()).sum();
+            (Box::new(model), n_nodes)
+        }
+        // A linear model has no trees; the third argument is ignored.
+        "linear" => (Box::new(LinearModelSpec::new().build()?.fit(&train)?), 0),
+        _ => {
+            let model = RandomForestSpec::default().n_trees(n_trees).seed(42).build()?.fit(&train)?;
+            let n_nodes = model.trees().map(|tree| tree.n_nodes()).sum();
+            (Box::new(model), n_nodes)
+        }
+    };
     println!("fit:      {:>8.2?}", start.elapsed());
 
     let start = Instant::now();
     let accuracy = model.score(&test)?;
     println!("predict:  {:>8.2?}  ({} rows)", start.elapsed(), test.num_rows());
-
-    let nodes: usize = model.trees().map(|tree| tree.n_nodes()).sum();
-    println!("accuracy: {accuracy:.4}   nodes per tree: {}", nodes / n_trees);
+    println!("accuracy: {accuracy:.4}   nodes per tree: {}", n_nodes / n_trees);
     Ok(())
 }

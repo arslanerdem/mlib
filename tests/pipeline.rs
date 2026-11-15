@@ -203,6 +203,41 @@ fn a_pipeline_predicts_two_targets_together() {
 }
 
 #[test]
+fn a_pipeline_classifies_two_targets_together() {
+    // Predict, from the same passenger details, both whether they
+    // survived and which class they travelled in.
+    let table = Table::from_csv("examples/data/titanic.csv").unwrap().drop_nulls(&["embarked"]).unwrap();
+    let spec = ModelSpec::new(&["sex", "age", "fare", "embarked"], &["survived", "pclass"]);
+    let data = ModelData::new(&table, spec.clone()).unwrap();
+    let pre = ColumnTransformer::empty()
+        .with_branch("num", Imputer::new(ImputeStrategy::Median), &["age", "fare"])
+        .with_branch("cat", OneHotEncoder::new(), &["sex", "embarked"]);
+    let forest = RandomForestSpec::new().n_trees(50).seed(1).build().unwrap();
+    let pipe = Pipeline::new(vec![Box::new(pre)], Box::new(forest));
+
+    // Cross-validation averages the accuracy over the two targets.
+    let folds = KFold::new(3).with_shuffle(1).splits(table.num_rows());
+    let cv = cross_validate_pipeline(&pipe, &data, &folds, &*scorer("accuracy").unwrap()).unwrap();
+    assert!(cv.mean > 0.75, "mean accuracy {}", cv.mean);
+
+    // Two columns of labels; probabilities for the two outcomes, then the three classes.
+    let fitted = pipe.fit(&data).unwrap();
+    assert_eq!(fitted.predict(&table).unwrap().dim(), (table.num_rows(), 2));
+    assert_eq!(fitted.target_classes(), vec![vec![0.0, 1.0], vec![1.0, 2.0, 3.0]]);
+    let probabilities = fitted.predict_proba(&table).unwrap();
+    assert_eq!(probabilities.ncols(), 5);
+
+    // The saved model keeps both targets and their classes.
+    let path = std::env::temp_dir().join("mlib_two_class_targets_test.json");
+    let path = path.to_str().unwrap();
+    save(&fitted, &spec, path).unwrap();
+    let loaded = load(path).unwrap().fitted;
+    assert_eq!(loaded.predict_proba(&table).unwrap(), probabilities);
+    assert_eq!(loaded.target_classes(), fitted.target_classes());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn a_plain_target_list_needs_exactly_one_target() {
     let x = Array2::zeros((4, 2));
     assert!(EncodedData::new(x.clone(), Array2::zeros((4, 1))).unwrap().target().is_ok());

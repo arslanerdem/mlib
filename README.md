@@ -2,8 +2,8 @@
 
 Machine learning for tabular data in Rust: fast, and written to be read.
 
-> **Early development.** This is version 0.0.3: it works and is tested,
-> but the API will change before 0.1.0.
+Add it to a project with `cargo add mlib`. Then a study is a handful of
+steps:
 
 ```rust
 use mlib::prelude::*;
@@ -37,13 +37,30 @@ let boosting = GradientBoostingSpec::default()
     .n_rounds(500)
     .learning_rate(0.05)
     .subsample(0.8)                    // each round sees a random 80% of the rows
+    .feature_fraction(0.8)             // ... and a random 80% of the features
+    .l2_regularization(1.0)            // small leaves predict smaller corrections
     .early_stopping_rounds(Some(20))   // stop 20 rounds after the best one
     .build()?;
 let pipe = Pipeline::new(vec![Box::new(pre)], Box::new(boosting));
 ```
 
-A saved model keeps working: from 0.1.0 on, a file saved by one 0.1.x
-release loads and predicts the same in every later one.
+A linear model is the plain baseline to compare them with — least
+squares for regression, logistic regression for classification — and
+its coefficients can be read off by name:
+
+```rust
+let baseline = LinearModelSpec::regressor().build()?.fit(&encoded)?;
+for (feature, coefficient) in baseline.named_coefficients(0) {
+    println!("{coefficient:+.4} × {feature}");
+}
+```
+
+A saved model keeps working: a file saved by one 0.1.x release loads
+and predicts the same in every later one. Code written against 0.1.0
+keeps compiling with every later 0.1.x, too.
+
+Every type and function in the [documentation](https://docs.rs/mlib)
+comes with an example that is run as a test.
 
 Several numeric targets can be predicted together — name them all in the
 `ModelSpec`, and `predict` returns one column per target:
@@ -53,6 +70,10 @@ let spec = ModelSpec::new(&["income", "rooms", "age"], &["latitude", "longitude"
 let predictions = fitted.predict(&table)?;         // rows × 2 matrix
 let latitude = predictions.column(0);
 ```
+
+Classifiers take several targets the same way. `predict_proba` then
+puts each target's class probabilities side by side, and
+`target_classes()` says which columns belong to which target.
 
 With a single target, `predict_single` returns a plain list. Matrices
 are `ndarray` arrays; use `mlib::ndarray` rather than adding the crate
@@ -71,8 +92,9 @@ if let Node::Split { feature, threshold, .. } = tree.node(0) {
 ## Try it
 
 ```sh
-cargo run --release --example titanic     # a complete study, start to finish
-cargo run --release --example benchmark   # forest speed on synthetic data
+cargo run --release --example titanic     # a complete classification study
+cargo run --release --example housing     # a complete regression study, baseline first
+cargo run --release --example benchmark   # fitting speed on synthetic data
 cargo test
 ```
 
@@ -81,8 +103,8 @@ cargo test
 | Area | Contents |
 |---|---|
 | Data | `Table` (typed columns with nulls, CSV loading), `ModelSpec`, `ModelData`, `EncodedData` |
-| Preprocessing | `Imputer`, `StandardScaler`, `OneHotEncoder`, `Chain`, `ColumnTransformer` |
-| Models | Random forest and gradient boosting — classification and regression |
+| Preprocessing | `Imputer`, `CategoricalImputer`, `StandardScaler`, `OneHotEncoder`, `Chain`, `ColumnTransformer` |
+| Models | Random forest, gradient boosting and a linear model — classification and regression |
 | Evaluation | accuracy, F1, log loss, confusion matrix, MSE, RMSE, MAE, R² |
 | Model selection | train/test split, k-fold, stratified and grouped k-fold, cross-validation, grid search |
 | Persistence | `save` / `load` of a whole fitted pipeline as versioned JSON |
@@ -97,10 +119,14 @@ src/
   spec.rs             ModelSpec (which columns play which role), ModelData
   encoded.rs          EncodedData (the dense matrix models train on), Feature
   traits.rs           Estimator, Predictor, Transformer, Scorer
-  preprocessing/      imputer, scaler, encoder, chain, column_transformer
+  preprocessing/      imputer, categorical_imputer, scaler, encoder, chain, column_transformer
   pipeline.rs         Pipeline, FittedPipeline
   forest.rs           random forest: the spec, fitting, prediction
   boosting.rs         gradient boosting: the spec, fitting, prediction
+  linear.rs           the linear model: least squares and logistic regression
+  minimise.rs         finding the lowest point of a function (used by logistic regression)
+  scores.rs           from scores to predictions, shared by boosting and the linear model
+  classes.rs          class labels per target, and where they sit among the probabilities
   tree/               what the two tree models share
     mod.rs            Tree, TreeNode, prediction
     binning.rs        features → at most 256 bins each
@@ -110,7 +136,7 @@ src/
   model_selection.rs  splits, cross-validation, grid search
   persist.rs          save / load
   random.rs           the seedable random number generator
-  testing.rs          check_estimator, for your own algorithms
+  testing.rs          check_estimator and check_transformer, for your own algorithms
 ```
 
 ## Speed
@@ -121,16 +147,18 @@ are how many times faster mlib is; 1.0 means the same speed.
 
 | Dataset (train rows × features) | Forest fit | Forest predict | Boosting fit | Boosting predict |
 |---|---|---|---|---|
-| California housing (16,512 × 8) | 4.2× | 4.8× | 7.9× | 7.6× |
-| Friedman #1 (80,000 × 10) | 4.7× | 3.1× | 3.6× | 4.7× |
-| Synthetic (80,000 × 20) | 10.1× | 2.4× | 2.4× | 3.9× |
-| Covertype (464,809 × 54, 7 classes) | 3.0× | 1.8× | 1.6–2.2× | 6.6× |
-| Synthetic (800,000 × 20) | 13.8× | 2.3× | 1.0–1.7× | 3.6× |
+| California housing (16,512 × 8) | 4.3× | 4.0× | 7.7× | 8.2× |
+| Friedman #1 (80,000 × 10) | 4.7× | 3.0× | 3.0× | 4.6× |
+| Synthetic (80,000 × 20) | 13.0× | 2.5× | 2.7× | 4.8× |
+| Covertype (464,809 × 54, 7 classes) | 2.8× | 1.6× | 1.6–2.2× | 5.0× |
+| Synthetic (800,000 × 20) | 13.6× | 2.3× | 1.0–1.7× | 2.9× |
 
 Forest scores are within 0.003 of scikit-learn's and boosting scores
 within 0.001 or better. Boosting is compared with scikit-learn's
 histogram gradient boosting. Where a range is shown, scikit-learn's
 timing varied between runs; the low end is against its best run.
+The linear model is not timed here; its coefficients are tested to
+match scikit-learn's.
 
 ## Licence
 

@@ -1,11 +1,11 @@
 [package]
 name = "mlib"
-version = "0.0.3"
+version = "0.1.0"
 edition = "2021"
-# Declared, not yet verified: the code has only been built on 1.91. CI must confirm it.
+# Confirmed by CI, which runs the tests on this version.
 rust-version = "1.85"
 authors = ["Erdem Arslan"]
-description = "Fast, readable machine learning for tabular data: tables, pipelines, random forests, gradient boosting."
+description = "Fast, readable machine learning for tabular data: tables, pipelines, random forests, gradient boosting, linear models."
 license = "MIT"
 repository = "https://github.com/arslanerdem/mlib"
 readme = "README.md"

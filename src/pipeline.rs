@@ -12,6 +12,35 @@ use serde::{Deserialize, Serialize};
 
 /// An unfitted pipeline. `fit` leaves it untouched, so one pipeline can
 /// be fitted many times (once per cross-validation fold, for instance).
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// // 40 customers; the older half churned.
+/// let ages: Vec<f64> = (0..40).map(|row| 20.0 + row as f64).collect();
+/// let cities: Vec<&str> = (0..40).map(|row| if row % 2 == 0 { "Oslo" } else { "Rome" }).collect();
+/// let churned: Vec<i64> = (0..40).map(|row| (row >= 20) as i64).collect();
+/// let table = Table::new(vec![
+///     ("age", Column::floats(&ages)),
+///     ("city", Column::texts(&cities)),
+///     ("churned", Column::ints(&churned)),
+/// ])?;
+/// let data = ModelData::new(&table, ModelSpec::new(&["age", "city"], &["churned"]))?;
+///
+/// let pre = ColumnTransformer::empty()
+///     .with_branch("num", Imputer::new(ImputeStrategy::Median), &["age"])
+///     .with_branch("cat", OneHotEncoder::new(), &["city"]);
+/// let forest = RandomForestSpec::default().n_trees(20).seed(1).build()?;
+/// let mut pipe = Pipeline::new(vec![Box::new(pre)], Box::new(forest));
+///
+/// // Settings can be changed by name, as grid search does.
+/// pipe.set_param("model__max_depth", &3.into())?;
+/// pipe.set_param("num__strategy", &"mean".into())?;
+///
+/// let fitted = pipe.fit(&data)?;
+/// assert!(fitted.score(&data)? > 0.9);
+/// # Ok::<(), Error>(())
+/// ```
 pub struct Pipeline {
     steps: Vec<Box<dyn Transformer>>,
     model: Box<dyn AnyEstimator>,
@@ -19,14 +48,14 @@ pub struct Pipeline {
 
 impl Clone for Pipeline {
     fn clone(&self) -> Pipeline {
-        Pipeline {
-            steps: self.steps.iter().map(|step| step.clone_box()).collect(),
-            model: self.model.clone_box(),
-        }
+        Pipeline { steps: self.steps.iter().map(|step| step.clone_box()).collect(), model: self.model.clone_box() }
     }
 }
 
 impl Pipeline {
+    /// The preprocessing steps, applied in order, and the model that
+    /// trains on their result. With no steps, every x column must
+    /// already be numeric and complete.
     pub fn new(steps: Vec<Box<dyn Transformer>>, model: Box<dyn AnyEstimator>) -> Pipeline {
         Pipeline { steps, model }
     }
@@ -49,7 +78,7 @@ impl Pipeline {
     /// reaches the `num` branch of a `ColumnTransformer`.
     pub fn set_param(&mut self, name: &str, value: &ParamValue) -> Result<()> {
         match name.strip_prefix("model__") {
-            Some(param) => self.model.set_param(param, value),
+            Some(param) => self.model.set_param_boxed(param, value),
             None => crate::preprocessing::set_param_on_first(&mut self.steps, name, value),
         }
     }
@@ -57,6 +86,40 @@ impl Pipeline {
 
 /// A fitted pipeline: fitted steps, fitted model, and the input it expects.
 /// This is the unit that gets saved and loaded.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// // 40 customers; the older half churned.
+/// let ages: Vec<f64> = (0..40).map(|row| 20.0 + row as f64).collect();
+/// let cities: Vec<&str> = (0..40).map(|row| if row % 2 == 0 { "Oslo" } else { "Rome" }).collect();
+/// let churned: Vec<i64> = (0..40).map(|row| (row >= 20) as i64).collect();
+/// let table = Table::new(vec![
+///     ("age", Column::floats(&ages)),
+///     ("city", Column::texts(&cities)),
+///     ("churned", Column::ints(&churned)),
+/// ])?;
+/// let data = ModelData::new(&table, ModelSpec::new(&["age", "city"], &["churned"]))?;
+/// let pre = ColumnTransformer::empty()
+///     .with_branch("num", Imputer::new(ImputeStrategy::Median), &["age"])
+///     .with_branch("cat", OneHotEncoder::new(), &["city"]);
+/// let forest = RandomForestSpec::default().n_trees(20).seed(1).build()?;
+/// let fitted = Pipeline::new(vec![Box::new(pre)], Box::new(forest)).fit(&data)?;
+///
+/// // New rows need only the x columns; the fitted steps are replayed on them.
+/// let new = Table::new(vec![("age", Column::floats(&[25.0, 55.0])), ("city", Column::texts(&["Rome", "Oslo"]))])?;
+/// assert_eq!(fitted.predict_single(&new)?, [0.0, 1.0]);
+/// assert_eq!(fitted.predict(&new)?.dim(), (2, 1));       // rows × targets
+/// assert_eq!(fitted.predict_proba(&new)?.dim(), (2, 2)); // rows × classes
+/// assert_eq!(fitted.target_classes(), [[0.0, 1.0]]);
+///
+/// // What the model saw, and what it made of it.
+/// let names: Vec<String> = fitted.features().iter().map(Feature::display_name).collect();
+/// assert_eq!(names, ["age", "city=Oslo", "city=Rome"]);
+/// let (most_important, _) = &fitted.feature_importances().unwrap()[0];
+/// assert_eq!(most_important, "age");
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FittedPipeline {
     steps: Vec<Box<dyn Transformer>>,
@@ -101,9 +164,16 @@ impl FittedPipeline {
     }
 
     /// Class probabilities for every row, one column per class
-    /// (classifiers only).
+    /// (classifiers only). With several targets, each target's classes
+    /// sit side by side in target order; `target_classes` names the columns.
     pub fn predict_proba(&self, table: &Table) -> Result<Array2<f64>> {
         self.model.predict_proba(&self.encode(table)?)
+    }
+
+    /// The class labels of each target, sorted, one list per target.
+    /// Empty for a regressor.
+    pub fn target_classes(&self) -> Vec<Vec<Label>> {
+        self.model.target_classes()
     }
 
     /// The model's default score on labelled data: accuracy for
@@ -139,9 +209,7 @@ impl FittedPipeline {
     /// Pick the fit-time x columns out of a table, checking their types.
     fn select_input(&self, table: &Table) -> Result<Table> {
         for (name, expected) in &self.schema.fields {
-            let column = table
-                .column(name)
-                .ok_or_else(|| Error::SchemaMismatch(format!("missing column '{name}'")))?;
+            let column = table.column(name).ok_or_else(|| Error::SchemaMismatch(format!("missing column '{name}'")))?;
             let all_null = column.null_count() == column.len();
             if !all_null && !compatible(*expected, column.data_type()) {
                 return Err(Error::SchemaMismatch(format!(
@@ -159,6 +227,5 @@ impl FittedPipeline {
 /// whether or not it is dictionary-encoded.
 fn compatible(expected: DataType, found: DataType) -> bool {
     use DataType::*;
-    expected == found
-        || matches!((expected, found), (Float, Int) | (Text, Categorical) | (Categorical, Text))
+    expected == found || matches!((expected, found), (Float, Int) | (Text, Categorical) | (Categorical, Text))
 }

@@ -11,6 +11,21 @@ use std::collections::BTreeMap;
 /// Applies `z = (x - mean) / std` to numeric (Float and Int) columns,
 /// which come out as Float. A column with zero variance maps to 0.
 /// Nulls stay null; other columns pass through unchanged.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let train = Table::new(vec![("income", Column::floats(&[10.0, 20.0, 30.0]))])?;
+/// let mut scaler = StandardScaler::new();
+/// let scaled = scaler.fit_transform(&train)?;
+/// assert_eq!(scaled.column_at(0).get_f64(1), Some(0.0)); // the mean maps to 0
+/// assert_eq!(scaler.stats()["income"].0, 20.0);
+///
+/// // New data is scaled with the training mean and spread, not its own.
+/// let new = Table::new(vec![("income", Column::floats(&[20.0]))])?;
+/// assert_eq!(scaler.transform(&new)?.column_at(0).get_f64(0), Some(0.0));
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct StandardScaler {
     /// Learned at fit: (mean, std) per numeric column, by name.
@@ -19,6 +34,7 @@ pub struct StandardScaler {
 }
 
 impl StandardScaler {
+    /// An unfitted scaler.
     pub fn new() -> StandardScaler {
         StandardScaler::default()
     }

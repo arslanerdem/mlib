@@ -8,12 +8,33 @@ use crate::traits::{ParamValue, Transformer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// What an [`Imputer`] puts in place of a missing number.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let table = Table::new(vec![("age", Column::Float(vec![Some(20.0), Some(20.0), Some(50.0), None]))])?;
+/// let fill = |strategy| -> Result<Option<f64>, Error> {
+///     Ok(Imputer::new(strategy).fit_transform(&table)?.column_at(0).get_f64(3))
+/// };
+/// assert_eq!(fill(ImputeStrategy::Mean)?, Some(30.0));
+/// assert_eq!(fill(ImputeStrategy::Median)?, Some(20.0));
+/// assert_eq!(fill(ImputeStrategy::MostFrequent)?, Some(20.0));
+/// assert_eq!(fill(ImputeStrategy::Constant(-1.0))?, Some(-1.0));
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ImputeStrategy {
+    /// The column's average in the training data.
     Mean,
+    /// The column's middle value in the training data. Not pulled about
+    /// by a few extreme values, as the mean is.
     Median,
+    /// The column's most common value in the training data. Ties go to
+    /// the smallest.
     MostFrequent,
+    /// The same number for every column.
     Constant(f64),
 }
 
@@ -32,7 +53,11 @@ impl ImputeStrategy {
             ImputeStrategy::Mean => values.iter().sum::<f64>() / values.len() as f64,
             ImputeStrategy::Median => {
                 let mid = values.len() / 2;
-                if values.len() % 2 == 1 { values[mid] } else { (values[mid - 1] + values[mid]) / 2.0 }
+                if values.len() % 2 == 1 {
+                    values[mid]
+                } else {
+                    (values[mid - 1] + values[mid]) / 2.0
+                }
             }
             // The longest run of equal values; ties go to the smallest value.
             _ => {
@@ -54,6 +79,21 @@ impl ImputeStrategy {
 /// Fills nulls in numeric (Float and Int) columns. Numeric columns come
 /// out as Float; other columns pass through unchanged. Impute *before*
 /// encoding.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let train = Table::new(vec![
+///     ("age", Column::Float(vec![Some(30.0), None, Some(50.0)])),
+///     ("city", Column::Text(vec![Some("Oslo".to_string()), None, None])),
+/// ])?;
+/// let mut imputer = Imputer::new(ImputeStrategy::Mean);
+/// let filled = imputer.fit_transform(&train)?;
+/// assert_eq!(filled.column("age").unwrap().null_count(), 0);
+/// assert_eq!(filled.column("city").unwrap().null_count(), 2); // text is left alone
+/// assert_eq!(imputer.fill_values()["age"], 40.0);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Imputer {
     strategy: ImputeStrategy,
@@ -63,6 +103,7 @@ pub struct Imputer {
 }
 
 impl Imputer {
+    /// An unfitted imputer with the given strategy.
     pub fn new(strategy: ImputeStrategy) -> Imputer {
         Imputer { strategy, fill_values: BTreeMap::new(), fitted: false }
     }
@@ -79,9 +120,10 @@ impl Transformer for Imputer {
         let mut fill_values = BTreeMap::new();
         for (name, values) in numeric_columns(table) {
             let present = values.into_iter().flatten().collect();
-            let fill = self.strategy.fill_value(present).ok_or_else(|| {
-                Error::InvalidData(format!("column '{name}' has no values to impute from"))
-            })?;
+            let fill = self
+                .strategy
+                .fill_value(present)
+                .ok_or_else(|| Error::InvalidData(format!("column '{name}' has no values to impute from")))?;
             fill_values.insert(name.to_string(), fill);
         }
         self.fill_values = fill_values;

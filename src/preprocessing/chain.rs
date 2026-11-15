@@ -8,12 +8,25 @@ use serde::{Deserialize, Serialize};
 
 /// Runs its steps in order — e.g. impute then scale inside one
 /// `ColumnTransformer` branch.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let train = Table::new(vec![("age", Column::Float(vec![Some(30.0), None, Some(50.0)]))])?;
+/// let mut steps = Chain::new(vec![Box::new(Imputer::new(ImputeStrategy::Mean)), Box::new(StandardScaler::new())]);
+/// let out = steps.fit_transform(&train)?;
+/// // The missing age became the mean (40), which scaling maps to 0.
+/// assert_eq!(out.column_at(0).get_f64(1), Some(0.0));
+/// assert_eq!(steps.steps().len(), 2);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Chain {
     pub(crate) steps: Vec<Box<dyn Transformer>>,
 }
 
 impl Chain {
+    /// A chain of the given steps, applied first to last.
     pub fn new(steps: Vec<Box<dyn Transformer>>) -> Chain {
         Chain { steps }
     }
@@ -72,11 +85,7 @@ impl Transformer for Chain {
 
 /// Offer a parameter to each step in turn; the first that accepts it wins.
 /// If none does, the last step's error is returned.
-pub(crate) fn set_param_on_first(
-    steps: &mut [Box<dyn Transformer>],
-    name: &str,
-    value: &ParamValue,
-) -> Result<()> {
+pub(crate) fn set_param_on_first(steps: &mut [Box<dyn Transformer>], name: &str, value: &ParamValue) -> Result<()> {
     let mut outcome = Err(crate::Error::InvalidSpec(format!("unknown parameter: {name}")));
     for step in steps {
         outcome = step.set_param(name, value);

@@ -34,24 +34,33 @@
 //!
 //! - [`Table`] holds raw, typed columns with nulls. It knows nothing about models.
 //! - [`ModelSpec`] names the x and y columns; [`ModelData`] pairs it with a table.
-//! - Transformers ([`Imputer`], [`OneHotEncoder`], [`StandardScaler`]) learn
-//!   from the training table and replay the same steps at predict time.
+//! - Transformers ([`Imputer`], [`CategoricalImputer`], [`OneHotEncoder`],
+//!   [`StandardScaler`]) learn from the training table and replay the
+//!   same steps at predict time.
 //! - A [`Pipeline`] chains transformers and a model. Fitting it gives a
 //!   [`FittedPipeline`] — a different type, so nothing unfitted can predict.
 //! - Models train on [`EncodedData`]: a dense numeric matrix. There are
-//!   two: a random forest ([`RandomForestSpec`]) and gradient boosting
-//!   ([`GradientBoostingSpec`]). Both do classification and regression.
+//!   three: a random forest ([`RandomForestSpec`]), gradient boosting
+//!   ([`GradientBoostingSpec`]) and a linear model ([`LinearModelSpec`]),
+//!   the plain baseline. All do classification and regression.
+
+// Every public item carries a doc comment; CI fails on one without.
+#![warn(missing_docs)]
 
 mod boosting;
+mod classes;
 mod encoded;
 mod error;
 mod forest;
+mod linear;
 pub mod metrics;
+mod minimise;
 pub mod model_selection;
 mod persist;
 mod pipeline;
 pub mod preprocessing;
 pub mod random;
+mod scores;
 mod spec;
 mod table;
 pub mod testing;
@@ -67,19 +76,21 @@ pub use boosting::{FittedGradientBoosting, GradientBoostingSpec, ValidGradientBo
 pub use encoded::{EncodedData, Feature};
 pub use error::{Error, Result};
 pub use forest::{FittedRandomForest, MaxFeatures, RandomForestSpec, ValidRandomForestSpec};
+pub use linear::{FittedLinearModel, LinearModelSpec, ValidLinearModelSpec};
 pub use metrics::{
     accuracy, confusion_matrix, f1_score, log_loss, mean_absolute_error, mean_squared_error, r2_score,
     root_mean_squared_error, scorer,
 };
 pub use model_selection::{
     cross_validate, cross_validate_pipeline, grid_search, grid_search_pipeline, train_test_split,
-    train_test_split_shuffled, CrossValidationResult, Folds, GridSearchResult, GroupKFold, KFold, ParamGrid,
-    Params, StratifiedKFold,
+    train_test_split_shuffled, CrossValidationResult, Folds, GridSearchResult, GroupKFold, KFold, ParamGrid, Params,
+    StratifiedKFold,
 };
 pub use persist::{load, save, SavedModel, FORMAT_VERSION};
 pub use pipeline::{FittedPipeline, Pipeline};
 pub use preprocessing::{
-    Chain, ColumnTransformer, HandleUnknown, ImputeStrategy, Imputer, OneHotEncoder, Remainder, StandardScaler,
+    CategoricalFill, CategoricalImputer, Chain, ColumnTransformer, HandleUnknown, ImputeStrategy, Imputer,
+    OneHotEncoder, Remainder, StandardScaler,
 };
 pub use spec::{ModelData, ModelSpec};
 pub use table::{Column, DataType, Schema, Table};
@@ -95,12 +106,13 @@ pub mod prelude {
     pub use crate::{
         accuracy, confusion_matrix, cross_validate, cross_validate_pipeline, f1_score, grid_search,
         grid_search_pipeline, load, log_loss, mean_absolute_error, mean_squared_error, r2_score,
-        root_mean_squared_error, save, scorer, train_test_split, train_test_split_shuffled, AnyEstimator, Chain,
-        Column, ColumnTransformer, CrossValidationResult, DataType, EncodedData, Error, Estimator, Feature,
-        FittedGradientBoosting, FittedPipeline, FittedRandomForest, Folds, GradientBoostingSpec, GridSearchResult,
-        GroupKFold, HandleUnknown, ImputeStrategy, Imputer, KFold, Label, MaxFeatures, ModelData, ModelSpec, Node,
-        OneHotEncoder, ParamGrid, ParamValue, Params, Pipeline, Predictor, RandomForestSpec, Remainder, SavedModel,
-        Scorer, StandardScaler, StratifiedKFold, Table, Task, Transformer, Tree, ValidGradientBoostingSpec,
+        root_mean_squared_error, save, scorer, train_test_split, train_test_split_shuffled, AnyEstimator,
+        CategoricalFill, CategoricalImputer, Chain, Column, ColumnTransformer, CrossValidationResult, DataType,
+        EncodedData, Error, Estimator, Feature, FittedGradientBoosting, FittedLinearModel, FittedPipeline,
+        FittedRandomForest, Folds, GradientBoostingSpec, GridSearchResult, GroupKFold, HandleUnknown, ImputeStrategy,
+        Imputer, KFold, Label, LinearModelSpec, MaxFeatures, ModelData, ModelSpec, Node, OneHotEncoder, ParamGrid,
+        ParamValue, Params, Pipeline, Predictor, RandomForestSpec, Remainder, SavedModel, Scorer, StandardScaler,
+        StratifiedKFold, Table, Task, Transformer, Tree, ValidGradientBoostingSpec, ValidLinearModelSpec,
         ValidRandomForestSpec,
     };
 }

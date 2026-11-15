@@ -29,6 +29,42 @@ fn regression(n: usize, seed: u64) -> EncodedData {
     EncodedData::new(x, y).unwrap()
 }
 
+/// Two class targets: a "colour" with three classes (10, 20, 30), set by
+/// the first feature, and a yes/no "size", set by the second.
+fn colour_and_size(n: usize, seed: u64) -> EncodedData {
+    let x = features(n, seed);
+    let y = Array2::from_shape_fn((n, 2), |(i, target)| match target {
+        0 => 10.0 * ((x[[i, 0]] * 3.0).floor().min(2.0) + 1.0),
+        _ => (x[[i, 1]] > 0.6) as u8 as f64,
+    });
+    EncodedData::new(x, y).unwrap()
+}
+
+/// The checks every classifier with several targets must pass.
+fn check_colour_and_size(model: &dyn Predictor, test: &EncodedData) {
+    // One column of predicted labels per target, each from its own classes.
+    let predictions = model.predict(test).unwrap();
+    assert_eq!(predictions.dim(), (test.num_rows(), 2));
+    assert!(predictions.column(0).iter().all(|label| [10.0, 20.0, 30.0].contains(label)));
+    assert!(predictions.column(1).iter().all(|label| [0.0, 1.0].contains(label)));
+    assert!(model.predict_single(test).is_err());
+    for target in 0..2 {
+        let (truth, predicted) = (test.y.column(target).to_vec(), predictions.column(target).to_vec());
+        assert!(accuracy(&truth, &predicted) > 0.9, "target {target}: {}", accuracy(&truth, &predicted));
+    }
+    // The default score is the accuracy averaged over the targets.
+    assert!(model.score(test).unwrap() > 0.9);
+
+    // Probabilities: the three colours, then the two sizes, side by side.
+    assert_eq!(model.target_classes(), vec![vec![10.0, 20.0, 30.0], vec![0.0, 1.0]]);
+    let probabilities = model.predict_proba(test).unwrap();
+    assert_eq!(probabilities.dim(), (test.num_rows(), 5));
+    for row in probabilities.rows() {
+        let (colour, size) = (row.iter().take(3).sum::<f64>(), row.iter().skip(3).sum::<f64>());
+        assert!((colour - 1.0).abs() < 1e-9 && (size - 1.0).abs() < 1e-9);
+    }
+}
+
 #[test]
 fn boosting_passes_the_conformance_battery() {
     check_estimator(&GradientBoostingSpec::new().n_rounds(10).build().unwrap());
@@ -44,10 +80,10 @@ fn invalid_specs_are_rejected_before_any_data_is_seen() {
     assert!(GradientBoostingSpec::new().max_depth(Some(0)).build().is_err());
 
     let mut spec = GradientBoostingSpec::new().build().unwrap();
-    assert!(Estimator::set_param(&mut spec, "learning_rate", &ParamValue::Float(-1.0)).is_err());
-    assert!(Estimator::set_param(&mut spec, "no_such_param", &ParamValue::Int(1)).is_err());
-    Estimator::set_param(&mut spec, "max_depth", &ParamValue::Int(3)).unwrap();
-    Estimator::set_param(&mut spec, "learning_rate", &ParamValue::Float(0.3)).unwrap();
+    assert!(spec.set_param("learning_rate", &ParamValue::Float(-1.0)).is_err());
+    assert!(spec.set_param("no_such_param", &ParamValue::Int(1)).is_err());
+    spec.set_param("max_depth", &ParamValue::Int(3)).unwrap();
+    spec.set_param("learning_rate", &ParamValue::Float(0.3)).unwrap();
     assert_eq!((spec.spec().max_depth, spec.spec().learning_rate), (Some(3), 0.3));
 }
 
@@ -130,7 +166,8 @@ fn large_data_gives_the_same_model_as_one_thread_would() {
     let data = two_classes(120_000, 1);
     let spec = GradientBoostingSpec::new().n_rounds(3).build().unwrap();
     let many_threads = spec.fit(&data).unwrap();
-    let one_thread = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| spec.fit(&data).unwrap());
+    let one_thread =
+        rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| spec.fit(&data).unwrap());
     assert_eq!(many_threads, one_thread);
 }
 
@@ -146,10 +183,8 @@ fn zero_weight_rows_are_ignored() {
     assert!(model.score(&two_classes(500, 9)).unwrap() > 0.9);
 }
 
-const HOUSING_INPUTS: [&str; 8] = [
-    "median_income", "house_age", "avg_rooms", "avg_bedrooms",
-    "population", "avg_occupancy", "latitude", "longitude",
-];
+const HOUSING_INPUTS: [&str; 8] =
+    ["median_income", "house_age", "avg_rooms", "avg_bedrooms", "population", "avg_occupancy", "latitude", "longitude"];
 
 #[test]
 fn real_data_reaches_the_expected_quality() {
@@ -164,6 +199,12 @@ fn real_data_reaches_the_expected_quality() {
     let model = GradientBoostingSpec::regressor().build().unwrap().fit(&data.take_rows(&train)).unwrap();
     let r2 = model.score(&data.take_rows(&test)).unwrap();
     assert!(r2 > 0.78, "r2 {r2}");
+
+    // Income is by far the strongest feature, as it is for the forest:
+    // importances follow how much each split improved the fit.
+    let (top_feature, top_importance) = model.ranked_importances()[0].clone();
+    assert_eq!(top_feature, "median_income");
+    assert!(top_importance > 0.4, "importance {top_importance}");
 }
 
 #[test]
@@ -203,9 +244,32 @@ fn several_targets_are_predicted_together() {
         let r2 = r2_score(&truth, &predicted);
         assert!(r2 > 0.95, "target {target}: r2 {r2}");
     }
+}
 
-    // A classifier takes one target only.
-    assert!(GradientBoostingSpec::new().build().unwrap().fit(&train).is_err());
+#[test]
+fn a_classifier_predicts_several_targets_together() {
+    let (train, test) = (colour_and_size(3000, 1), colour_and_size(1000, 2));
+    let spec = GradientBoostingSpec::new().n_rounds(40).build().unwrap();
+    let model = spec.fit(&train).unwrap();
+    check_colour_and_size(&model, &test);
+    // Three scores for the colour, one for the yes/no size.
+    assert_eq!((model.n_scores(), model.classes()), (4, &[10.0, 20.0, 30.0, 0.0, 1.0][..]));
+
+    // Each target is learned exactly as it would be on its own.
+    let mut colour_only = train.clone();
+    colour_only.y = train.y.slice(ndarray::s![.., 0..1]).to_owned();
+    let alone = spec.fit(&colour_only).unwrap();
+    let (together, alone) = (model.predict_proba(&test).unwrap(), alone.predict_proba(&test).unwrap());
+    assert_eq!(together.slice(ndarray::s![.., 0..3]), alone);
+
+    // Early stopping watches the loss of both targets together.
+    let stopped = GradientBoostingSpec::new().n_rounds(300).early_stopping_rounds(Some(5)).build().unwrap();
+    let stopped = stopped.fit(&train).unwrap();
+    assert!(stopped.n_rounds() < 300 && stopped.score(&test).unwrap() > 0.9);
+    // A target with a single class cannot be learned.
+    let mut one_class = train.clone();
+    one_class.y.column_mut(1).fill(1.0);
+    assert!(spec.fit(&one_class).is_err());
 }
 
 /// A regression target with a lot of noise: easy to overfit.
@@ -268,14 +332,81 @@ fn the_new_settings_are_validated_and_reachable_by_name() {
     assert!(GradientBoostingSpec::new().validation_fraction(1.0).build().is_err());
 
     let mut spec = GradientBoostingSpec::new().build().unwrap();
-    Estimator::set_param(&mut spec, "subsample", &ParamValue::Float(0.8)).unwrap();
-    Estimator::set_param(&mut spec, "early_stopping_rounds", &ParamValue::Int(7)).unwrap();
+    spec.set_param("subsample", &ParamValue::Float(0.8)).unwrap();
+    spec.set_param("early_stopping_rounds", &ParamValue::Int(7)).unwrap();
     assert_eq!((spec.spec().subsample, spec.spec().early_stopping_rounds), (0.8, Some(7)));
-    Estimator::set_param(&mut spec, "early_stopping_rounds", &ParamValue::Text("none".to_string())).unwrap();
+    spec.set_param("early_stopping_rounds", &ParamValue::Text("none".to_string())).unwrap();
     assert_eq!(spec.spec().early_stopping_rounds, None);
 
     // Too few rows to hold any out.
     let tiny = regression(3, 1);
     let cannot_hold_out = GradientBoostingSpec::regressor().early_stopping_rounds(Some(5)).validation_fraction(0.01);
     assert!(cannot_hold_out.build().unwrap().fit(&tiny).is_err());
+}
+
+#[test]
+fn feature_sampling_is_random_but_repeatable() {
+    let (train, test) = (regression(3000, 1), regression(1000, 2));
+    let spec = |seed| GradientBoostingSpec::regressor().feature_fraction(0.6).seed(seed).build().unwrap();
+    // Same seed, same model; another seed, another model.
+    assert_eq!(spec(1).fit(&train).unwrap(), spec(1).fit(&train).unwrap());
+    assert_ne!(spec(1).fit(&train).unwrap(), spec(2).fit(&train).unwrap());
+    // Three of the five features per round is still plenty to learn this function.
+    assert!(spec(1).fit(&train).unwrap().score(&test).unwrap() > 0.97);
+
+    // Each round's tree uses at most the three features it was given.
+    let model = spec(1).fit(&train).unwrap();
+    for tree in model.trees() {
+        let mut used: Vec<usize> = (0..tree.n_nodes())
+            .filter_map(|index| match tree.node(index) {
+                Node::Split { feature, .. } => Some(feature),
+                _ => None,
+            })
+            .collect();
+        used.sort_unstable();
+        used.dedup();
+        assert!(used.len() <= 3, "a tree split on {used:?}");
+    }
+
+    // However small the fraction, one feature is kept.
+    let one_feature = GradientBoostingSpec::regressor().feature_fraction(0.01).build().unwrap();
+    assert!(one_feature.fit(&train).unwrap().score(&train).unwrap() > 0.5);
+}
+
+#[test]
+fn l2_regularization_shrinks_the_corrections() {
+    let (train, test) = (noisy_regression(300, 1), noisy_regression(2000, 2));
+    let spec = |l2| GradientBoostingSpec::regressor().min_samples_leaf(1).l2_regularization(l2).build().unwrap();
+    let largest_leaf = |model: &FittedGradientBoosting| {
+        let leaves = (0..model.tree(0, 0).n_nodes()).filter_map(|index| match model.tree(0, 0).node(index) {
+            Node::Leaf { prediction } => Some(prediction[0].abs()),
+            _ => None,
+        });
+        leaves.fold(0.0, f64::max)
+    };
+    let (plain, regularised) = (spec(0.0).fit(&train).unwrap(), spec(20.0).fit(&train).unwrap());
+
+    // The first tree's corrections are smaller, the training fit is
+    // looser, and on these few noisy rows the test score is better.
+    assert!(largest_leaf(&regularised) < largest_leaf(&plain));
+    assert!(regularised.score(&train).unwrap() < plain.score(&train).unwrap());
+    assert!(regularised.score(&test).unwrap() > plain.score(&test).unwrap());
+}
+
+#[test]
+fn feature_fraction_and_l2_are_validated_and_reachable_by_name() {
+    assert!(GradientBoostingSpec::new().feature_fraction(0.0).build().is_err());
+    assert!(GradientBoostingSpec::new().feature_fraction(1.1).build().is_err());
+    assert!(GradientBoostingSpec::new().l2_regularization(-1.0).build().is_err());
+    assert!(GradientBoostingSpec::new().l2_regularization(f64::NAN).build().is_err());
+
+    let mut spec = GradientBoostingSpec::new().build().unwrap();
+    spec.set_param("feature_fraction", &ParamValue::Float(0.5)).unwrap();
+    spec.set_param("l2_regularization", &ParamValue::Float(2.0)).unwrap();
+    assert_eq!((spec.spec().feature_fraction, spec.spec().l2_regularization), (0.5, 2.0));
+
+    // Both work for classifiers too.
+    let data = three_classes(2000, 1);
+    let model = GradientBoostingSpec::new().feature_fraction(0.6).l2_regularization(1.0).build().unwrap();
+    assert!(model.fit(&data).unwrap().score(&data).unwrap() > 0.9);
 }

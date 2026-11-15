@@ -11,16 +11,36 @@ use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The type of the values in a column.
 #[non_exhaustive]
 pub enum DataType {
+    /// Numbers with decimals.
     Float,
+    /// Whole numbers.
     Int,
+    /// True or false.
     Bool,
+    /// Free text.
     Text,
+    /// Text drawn from a fixed list of categories.
     Categorical,
 }
 
 /// Column names and types, in order.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let table = Table::new(vec![
+///     ("age", Column::floats(&[34.0, 51.0])),
+///     ("city", Column::texts(&["Oslo", "Rome"])),
+/// ])?;
+/// let schema = table.schema();
+/// assert_eq!(schema.names(), ["age", "city"]);
+/// assert_eq!(schema.get("city"), Some(DataType::Text));
+/// assert_eq!(schema.index_of("income"), None);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Schema {
     pub(crate) fields: Vec<(String, DataType)>,
@@ -50,15 +70,39 @@ impl Schema {
 
 /// One typed column. A missing value is `None` — null is a property of
 /// the slot, never a sentinel like `NaN` or `"NA"`.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let age = Column::Float(vec![Some(34.0), None, Some(51.0)]);
+/// assert_eq!(age.len(), 3);
+/// assert_eq!(age.data_type(), DataType::Float);
+/// assert_eq!(age.null_count(), 1);
+/// assert!(age.is_null(1));
+/// assert_eq!(age.get_f64(0), Some(34.0));
+///
+/// // Shortcuts for columns with nothing missing.
+/// let city = Column::texts(&["Oslo", "Rome"]);
+/// assert_eq!(city.get_string(1), Some("Rome".to_string()));
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Column {
+    /// Numbers with decimals.
     Float(Vec<Option<f64>>),
+    /// Whole numbers.
     Int(Vec<Option<i64>>),
+    /// True or false.
     Bool(Vec<Option<bool>>),
+    /// Free text.
     Text(Vec<Option<String>>),
     /// Dictionary-encoded text: `codes[i]` indexes into `categories`.
-    Categorical { codes: Vec<Option<u32>>, categories: Vec<String> },
+    Categorical {
+        /// One position in `categories` per row.
+        codes: Vec<Option<u32>>,
+        /// The distinct labels.
+        categories: Vec<String>,
+    },
 }
 
 impl Column {
@@ -77,6 +121,7 @@ impl Column {
         Column::Text(values.iter().map(|v| Some(v.to_string())).collect())
     }
 
+    /// Number of rows, nulls included.
     pub fn len(&self) -> usize {
         match self {
             Column::Float(v) => v.len(),
@@ -87,10 +132,12 @@ impl Column {
         }
     }
 
+    /// Whether the column has no rows.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// The type of the column's values.
     pub fn data_type(&self) -> DataType {
         match self {
             Column::Float(_) => DataType::Float,
@@ -145,9 +192,7 @@ impl Column {
             Column::Int(v) => v[i].map(|x| x.to_string()),
             Column::Bool(v) => v[i].map(|x| x.to_string()),
             Column::Text(v) => v[i].clone(),
-            Column::Categorical { codes, categories } => {
-                codes[i].map(|code| categories[code as usize].clone())
-            }
+            Column::Categorical { codes, categories } => codes[i].map(|code| categories[code as usize].clone()),
         }
     }
 
@@ -194,6 +239,28 @@ impl Column {
     }
 }
 
+/// Named, typed columns of equal length. Print one (`println!("{table}")`)
+/// for its shape and first rows.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let table = Table::new(vec![
+///     ("age", Column::Float(vec![Some(34.0), None, Some(51.0)])),
+///     ("city", Column::texts(&["Oslo", "Rome", "Oslo"])),
+/// ])?;
+/// assert_eq!((table.num_rows(), table.num_columns()), (3, 2));
+/// assert_eq!(table.require_column("age")?.null_count(), 1);
+///
+/// // Every operation gives a new table; the original is never changed.
+/// let complete = table.drop_nulls(&["age"])?;
+/// assert_eq!(complete.num_rows(), 2);
+/// let cities = table.select(&["city"])?.with_categorical(&["city"])?;
+/// assert_eq!(cities.schema().get("city"), Some(DataType::Categorical));
+/// let last_first = table.take_rows(&[2, 0]);
+/// assert_eq!(last_first.column_at(0).get_f64(0), Some(51.0));
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Table {
     pub(crate) schema: Schema,
@@ -230,11 +297,30 @@ impl Table {
     /// values, tried in this order: Int, Float, Bool, Text. Empty cells are
     /// null. Text columns stay Text — use [`Table::with_categorical`] to
     /// dictionary-encode them.
+    ///
+    /// ```no_run
+    /// use mlib::prelude::*;
+    ///
+    /// let table = Table::from_csv("data.csv")?;
+    /// println!("{table}");
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn from_csv(path: &str) -> Result<Table> {
         Table::from_csv_reader(std::fs::File::open(path)?)
     }
 
     /// Load from any CSV reader (for tests and in-memory data).
+    ///
+    /// ```
+    /// use mlib::prelude::*;
+    ///
+    /// let csv = "age,city,member\n34,Oslo,true\n,Rome,false\n";
+    /// let table = Table::from_csv_reader(csv.as_bytes())?;
+    /// assert_eq!(table.schema().get("age"), Some(DataType::Int));
+    /// assert_eq!(table.schema().get("member"), Some(DataType::Bool));
+    /// assert!(table.column("age").unwrap().is_null(1)); // the empty cell
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn from_csv_reader<R: std::io::Read>(reader: R) -> Result<Table> {
         let mut reader = csv::ReaderBuilder::new().trim(csv::Trim::All).from_reader(reader);
         let names: Vec<String> = reader.headers()?.iter().map(str::to_string).collect();
@@ -261,6 +347,7 @@ impl Table {
         self.columns.first().map_or(0, Column::len)
     }
 
+    /// Number of columns.
     pub fn num_columns(&self) -> usize {
         self.columns.len()
     }
@@ -287,10 +374,7 @@ impl Table {
 
     /// A new table with only the named columns, in the given order.
     pub fn select(&self, names: &[&str]) -> Result<Table> {
-        let columns = names
-            .iter()
-            .map(|name| self.require_column(name).cloned())
-            .collect::<Result<Vec<Column>>>()?;
+        let columns = names.iter().map(|name| self.require_column(name).cloned()).collect::<Result<Vec<Column>>>()?;
         Table::from_parts(names.iter().map(|name| name.to_string()).collect(), columns)
     }
 

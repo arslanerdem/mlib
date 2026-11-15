@@ -23,8 +23,16 @@ fn passengers() -> Table {
 
 fn preprocessing() -> ColumnTransformer {
     ColumnTransformer::empty()
-        .with_branch("num", Chain::new(vec![Box::new(Imputer::new(ImputeStrategy::Median)), Box::new(StandardScaler::new())]), &["age", "fare"])
-        .with_branch("cat", OneHotEncoder::new(), &["pclass", "sex", "embarked"])
+        .with_branch(
+            "num",
+            Chain::new(vec![Box::new(Imputer::new(ImputeStrategy::Median)), Box::new(StandardScaler::new())]),
+            &["age", "fare"],
+        )
+        .with_branch(
+            "cat",
+            Chain::new(vec![Box::new(CategoricalImputer::constant("missing")), Box::new(OneHotEncoder::new())]),
+            &["pclass", "sex", "embarked"],
+        )
 }
 
 /// Small models that between them use every type that can be saved.
@@ -38,15 +46,28 @@ fn fitted_pipelines(table: &Table) -> Vec<(&'static str, FittedPipeline, ModelSp
     let forest = RandomForestSpec::new().n_trees(5).max_depth(Some(4)).seed(1).build().unwrap();
     let forest_two_targets = RandomForestSpec::regressor().n_trees(5).max_depth(Some(4)).seed(1).build().unwrap();
     let boosting = GradientBoostingSpec::new().n_rounds(5).max_depth(Some(3)).build().unwrap();
-    let boosting_regressor =
-        GradientBoostingSpec::regressor().n_rounds(20).early_stopping_rounds(Some(3)).subsample(0.8).build().unwrap();
+    let boosting_regressor = GradientBoostingSpec::regressor()
+        .n_rounds(20)
+        .early_stopping_rounds(Some(3))
+        .subsample(0.8)
+        .feature_fraction(0.8)
+        .l2_regularization(1.0)
+        .build()
+        .unwrap();
+    let boosting_two_class_targets = GradientBoostingSpec::new().n_rounds(5).max_depth(Some(3)).build().unwrap();
+    let linear = LinearModelSpec::new().l2_regularization(1.0).build().unwrap();
+    let linear_two_targets = LinearModelSpec::regressor().build().unwrap();
 
     let named = |name, (fitted, spec)| (name, fitted, spec);
     vec![
-        named("forest_classifier", fit(Box::new(forest), &["survived"])),
+        named("forest_classifier", fit(Box::new(forest.clone()), &["survived"])),
         named("forest_two_targets", fit(Box::new(forest_two_targets), &["survived", "sibsp"])),
         named("boosting_classifier", fit(Box::new(boosting), &["survived"])),
         named("boosting_regressor", fit(Box::new(boosting_regressor), &["parch"])),
+        named("forest_two_class_targets", fit(Box::new(forest.clone()), &["survived", "sibsp"])),
+        named("boosting_two_class_targets", fit(Box::new(boosting_two_class_targets), &["survived", "sibsp"])),
+        named("linear_classifier", fit(Box::new(linear), &["survived"])),
+        named("linear_two_targets", fit(Box::new(linear_two_targets), &["survived", "sibsp"])),
     ]
 }
 
@@ -89,4 +110,15 @@ fn files_from_earlier_releases_load_and_predict_the_same() {
         checked += 1;
     }
     assert!(checked >= 4, "expected saved-model files in {FOLDER}, found {checked}");
+}
+
+#[test]
+fn every_saveable_type_survives_save_and_load() {
+    let table = passengers();
+    for (name, fitted, spec) in fitted_pipelines(&table) {
+        let path = std::env::temp_dir().join(format!("mlib_saved_models_{name}.json"));
+        save(&fitted, &spec, path.to_str().unwrap()).unwrap();
+        let loaded = load(path.to_str().unwrap()).unwrap();
+        assert_eq!(predictions_as_rows(&loaded.fitted, &table), predictions_as_rows(&fitted, &table), "{name}");
+    }
 }

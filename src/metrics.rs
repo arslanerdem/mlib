@@ -12,22 +12,51 @@ fn check_lengths(y_true: &[f64], n_predictions: usize) {
 }
 
 /// Fraction of predictions that equal the truth.
+///
+/// ```
+/// use mlib::accuracy;
+///
+/// assert_eq!(accuracy(&[0.0, 1.0, 1.0, 0.0], &[0.0, 1.0, 0.0, 0.0]), 0.75);
+/// ```
 pub fn accuracy(y_true: &[f64], y_pred: &[f64]) -> f64 {
     check_lengths(y_true, y_pred.len());
     let correct = y_true.iter().zip(y_pred).filter(|(truth, prediction)| truth == prediction).count();
     correct as f64 / y_true.len() as f64
 }
 
+/// The average squared difference between truth and prediction.
+///
+/// ```
+/// use mlib::mean_squared_error;
+///
+/// assert_eq!(mean_squared_error(&[1.0, 2.0, 3.0, 4.0], &[1.0, 2.0, 3.0, 8.0]), 4.0);
+/// ```
 pub fn mean_squared_error(y_true: &[f64], y_pred: &[f64]) -> f64 {
     check_lengths(y_true, y_pred.len());
     let squares: f64 = y_true.iter().zip(y_pred).map(|(truth, prediction)| (truth - prediction).powi(2)).sum();
     squares / y_true.len() as f64
 }
 
+/// The square root of [`mean_squared_error`]: a typical error, in the
+/// target's own units.
+///
+/// ```
+/// use mlib::root_mean_squared_error;
+///
+/// assert_eq!(root_mean_squared_error(&[1.0, 2.0, 3.0, 4.0], &[1.0, 2.0, 3.0, 8.0]), 2.0);
+/// ```
 pub fn root_mean_squared_error(y_true: &[f64], y_pred: &[f64]) -> f64 {
     mean_squared_error(y_true, y_pred).sqrt()
 }
 
+/// The average size of the difference between truth and prediction.
+/// One large miss counts for less here than in [`mean_squared_error`].
+///
+/// ```
+/// use mlib::mean_absolute_error;
+///
+/// assert_eq!(mean_absolute_error(&[1.0, 2.0, 3.0, 4.0], &[1.0, 2.0, 3.0, 8.0]), 1.0);
+/// ```
 pub fn mean_absolute_error(y_true: &[f64], y_pred: &[f64]) -> f64 {
     check_lengths(y_true, y_pred.len());
     let total: f64 = y_true.iter().zip(y_pred).map(|(truth, prediction)| (truth - prediction).abs()).sum();
@@ -36,6 +65,14 @@ pub fn mean_absolute_error(y_true: &[f64], y_pred: &[f64]) -> f64 {
 
 /// Coefficient of determination: 1 is perfect, 0 is no better than
 /// always predicting the mean.
+///
+/// ```
+/// use mlib::r2_score;
+///
+/// let truth = [1.0, 2.0, 3.0];
+/// assert_eq!(r2_score(&truth, &[1.0, 2.0, 3.0]), 1.0);
+/// assert_eq!(r2_score(&truth, &[2.0, 2.0, 2.0]), 0.0);
+/// ```
 pub fn r2_score(y_true: &[f64], y_pred: &[f64]) -> f64 {
     check_lengths(y_true, y_pred.len());
     let mean = y_true.iter().sum::<f64>() / y_true.len() as f64;
@@ -48,7 +85,16 @@ pub fn r2_score(y_true: &[f64], y_pred: &[f64]) -> f64 {
     1.0 - residual / total
 }
 
-/// F1 for binary classification; the positive class is `1.0`.
+/// F1 for binary classification; the positive class is `1.0`. It is
+/// high only when most predicted positives are right *and* most actual
+/// positives are found.
+///
+/// ```
+/// use mlib::f1_score;
+///
+/// // One of two predicted positives is right; one of two actual positives is found.
+/// assert_eq!(f1_score(&[1.0, 1.0, 0.0, 0.0], &[1.0, 0.0, 1.0, 0.0]), 0.5);
+/// ```
 pub fn f1_score(y_true: &[f64], y_pred: &[f64]) -> f64 {
     check_lengths(y_true, y_pred.len());
     let pairs = || y_true.iter().zip(y_pred);
@@ -64,18 +110,37 @@ pub fn f1_score(y_true: &[f64], y_pred: &[f64]) -> f64 {
 /// Mean negative log-likelihood. `y_true` holds class indices
 /// (0, 1, 2, ...); `probabilities[[i, c]]` is row `i`'s probability of
 /// class `c`.
+///
+/// ```
+/// use mlib::log_loss;
+/// use mlib::ndarray::array;
+///
+/// // Confident and right costs little; undecided costs ln 2.
+/// let confident = array![[0.9, 0.1], [0.1, 0.9]];
+/// let undecided = array![[0.5, 0.5], [0.5, 0.5]];
+/// assert!(log_loss(&[0.0, 1.0], &confident) < 0.11);
+/// assert!((log_loss(&[0.0, 1.0], &undecided) - 2f64.ln()).abs() < 1e-12);
+/// ```
 pub fn log_loss(y_true: &[f64], probabilities: &Array2<f64>) -> f64 {
     check_lengths(y_true, probabilities.nrows());
-    let total: f64 = y_true
-        .iter()
-        .zip(probabilities.rows())
-        .map(|(class, row)| -row[*class as usize].clamp(1e-15, 1.0).ln())
-        .sum();
+    let total: f64 =
+        y_true.iter().zip(probabilities.rows()).map(|(class, row)| -row[*class as usize].clamp(1e-15, 1.0).ln()).sum();
     total / y_true.len() as f64
 }
 
 /// Apply a metric to each target column and average the results.
 /// `y_true` and `y_pred` are (rows × targets) and must have the same shape.
+///
+/// ```
+/// use mlib::metrics::{mean_absolute_error, mean_over_targets};
+/// use mlib::ndarray::array;
+///
+/// let truth = array![[1.0, 10.0], [2.0, 20.0]];
+/// let predicted = array![[1.0, 12.0], [2.0, 22.0]];
+/// // The first target is exact, the second is off by 2.
+/// assert_eq!(mean_over_targets(mean_absolute_error, &truth, &predicted)?, 1.0);
+/// # Ok::<(), mlib::Error>(())
+/// ```
 pub fn mean_over_targets(
     metric: impl Fn(&[f64], &[f64]) -> f64,
     y_true: &Array2<f64>,
@@ -94,6 +159,14 @@ pub fn mean_over_targets(
 
 /// Counts of (actual, predicted) pairs as a matrix: rows are actual
 /// classes, columns predicted. Labels must be class indices `0..n_classes`.
+///
+/// ```
+/// use mlib::confusion_matrix;
+/// use mlib::ndarray::array;
+///
+/// let matrix = confusion_matrix(&[0.0, 0.0, 1.0, 1.0], &[0.0, 1.0, 1.0, 1.0], 2);
+/// assert_eq!(matrix, array![[1, 1], [0, 2]]);
+/// ```
 pub fn confusion_matrix(y_true: &[f64], y_pred: &[f64], n_classes: usize) -> Array2<usize> {
     check_lengths(y_true, y_pred.len());
     let mut matrix = Array2::zeros((n_classes, n_classes));
@@ -135,13 +208,28 @@ impl Scorer for MetricScorer {
 /// Binary log loss from the probability of class 1.
 fn binary_log_loss(y_true: &[f64], probability_of_one: &[f64]) -> f64 {
     let probabilities = Array2::from_shape_fn((y_true.len(), 2), |(row, class)| {
-        if class == 1 { probability_of_one[row] } else { 1.0 - probability_of_one[row] }
+        if class == 1 {
+            probability_of_one[row]
+        } else {
+            1.0 - probability_of_one[row]
+        }
     });
     log_loss(y_true, &probabilities)
 }
 
 /// Look a scorer up by name: "accuracy", "f1", "r2", "rmse", "mse",
 /// "mae", "log_loss" (binary targets 0/1 only).
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let rmse = scorer("rmse")?;
+/// assert_eq!(rmse.score(&[1.0, 2.0], &[1.0, 4.0]), 2f64.sqrt());
+/// // Cross-validation uses this to report every score as "higher is better".
+/// assert!(!rmse.greater_is_better());
+/// assert!(scorer("no_such_metric").is_err());
+/// # Ok::<(), Error>(())
+/// ```
 pub fn scorer(name: &str) -> Result<Box<dyn Scorer>> {
     let (name, metric, greater_is_better): (_, Metric, _) = match name {
         "accuracy" => ("accuracy", accuracy, true),

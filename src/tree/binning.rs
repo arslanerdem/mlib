@@ -53,7 +53,11 @@ fn cut_points(values: &[f64]) -> Vec<f64> {
     // A point between two distinct neighbours: lo <= midpoint < hi.
     fn midpoint(lo: f64, hi: f64) -> f64 {
         let mid = lo + (hi - lo) / 2.0;
-        if mid < hi { mid } else { lo }
+        if mid < hi {
+            mid
+        } else {
+            lo
+        }
     }
 
     let mut sorted = values.to_vec();

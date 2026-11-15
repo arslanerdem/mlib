@@ -5,11 +5,18 @@
 //! seam where a GPU implementation could slot in later.
 //!
 //! One formula serves both tasks. Give every sample a target vector
-//! (one-hot class for classification, the value for regression); then the
+//! (one-hot class for classification, the value for regression; with
+//! several targets, each target's vector side by side); then the
 //! quality of a group of samples is `sum_k (S_k)^2 / W`, where `S_k` is
 //! the weighted sum of channel `k` and `W` the total weight. Maximising
 //! that score over the two sides of a split minimises Gini impurity
 //! (classification) or variance (regression).
+//!
+//! Gradient boosting can ask for L2 regularisation: a number `l2` is
+//! added to `W` wherever a sum is divided by it. A group with little
+//! weight then scores less and predicts closer to zero, so the tree is
+//! slower to trust a handful of rows. Everywhere else `l2` is 0 and
+//! changes nothing.
 
 use super::binning::MAX_BINS;
 use ndarray::{Array2, ArrayView1};
@@ -18,6 +25,15 @@ use ndarray::{Array2, ArrayView1};
 pub enum Targets {
     /// Classification: the class index of each row.
     Classes { class_of_row: Vec<u32>, n_classes: usize },
+    /// Classification on several targets. Every class of every target
+    /// has a channel of its own, the targets side by side.
+    SeveralClasses {
+        /// Row after row, `n_targets` channel numbers each: the channel
+        /// of the row's class for every target.
+        channels: Vec<u32>,
+        n_targets: usize,
+        n_channels: usize,
+    },
     /// Regression on one or several targets.
     Values {
         /// Row after row, `n_targets` numbers each: `(value - mean) / scale`.
@@ -43,7 +59,11 @@ impl Targets {
         let scale_of = |(column, mean): (ArrayView1<f64>, &f64)| {
             let variance = column.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / column.len() as f64;
             // A constant target has no spread to scale by.
-            if n_targets == 1 || variance == 0.0 { 1.0 } else { variance.sqrt() }
+            if n_targets == 1 || variance == 0.0 {
+                1.0
+            } else {
+                variance.sqrt()
+            }
         };
         let scales: Vec<f64> = y.columns().into_iter().zip(&means).map(scale_of).collect();
         let standardised = y.rows().into_iter().flat_map(|row| {
@@ -58,22 +78,52 @@ impl Targets {
         Targets::Values { values, n_targets: 1, means: vec![0.0], scales: vec![1.0] }
     }
 
+    /// Classification targets from each target's class index per row
+    /// (`index_of_row[target][row]`) and each target's number of classes.
+    pub fn classes(index_of_row: Vec<Vec<u32>>, classes_per_target: &[usize]) -> Targets {
+        if let [n_classes] = classes_per_target {
+            // Invariant: one target, so one list of class indices.
+            let class_of_row = index_of_row.into_iter().next().unwrap();
+            return Targets::Classes { class_of_row, n_classes: *n_classes };
+        }
+        let n_targets = classes_per_target.len();
+        // The first channel of each target: the number of classes before it.
+        let first_channel: Vec<u32> = classes_per_target
+            .iter()
+            .scan(0, |next, &n_classes| {
+                *next += n_classes as u32;
+                Some(*next - n_classes as u32)
+            })
+            .collect();
+        let n_rows = index_of_row[0].len();
+        let channels = (0..n_rows)
+            .flat_map(|row| (0..n_targets).map(move |t| (row, t)))
+            .map(|(row, t)| first_channel[t] + index_of_row[t][row]);
+        Targets::SeveralClasses { channels: channels.collect(), n_targets, n_channels: classes_per_target.iter().sum() }
+    }
+
     pub fn n_channels(&self) -> usize {
         match self {
             Targets::Classes { n_classes, .. } => *n_classes,
+            Targets::SeveralClasses { n_channels, .. } => *n_channels,
             Targets::Values { n_targets, .. } => *n_targets,
         }
     }
 
     /// What a [`Sample`] carries of its row's target: the class index, or
-    /// the value of a single regression target. With several regression
-    /// targets the values stay in `Targets` and are looked up by row.
+    /// the value of a single regression target. With several targets the
+    /// values stay in `Targets` and are looked up by row.
     pub fn of_row(&self, row: usize) -> f64 {
         match self {
             Targets::Classes { class_of_row, .. } => class_of_row[row] as f64,
             Targets::Values { values, n_targets: 1, .. } => values[row],
-            Targets::Values { .. } => 0.0,
+            Targets::Values { .. } | Targets::SeveralClasses { .. } => 0.0,
         }
+    }
+
+    /// The channels of a row's classes, when there are several class targets.
+    fn channels_of<'a>(channels: &'a [u32], n_targets: usize, sample: &Sample) -> &'a [u32] {
+        &channels[sample.row as usize * n_targets..][..n_targets]
     }
 
     /// A row's values, when there are several regression targets.
@@ -81,13 +131,21 @@ impl Targets {
         &values[sample.row as usize * n_targets..][..n_targets]
     }
 
-    /// Add a sample's weighted targets to per-target sums, when there are
-    /// several regression targets.
+    /// Add a sample's weighted targets to the per-channel sums, when
+    /// there are several targets.
     fn add_to(&self, sample: &Sample, sums: &mut [f64]) {
-        if let Targets::Values { values, n_targets, .. } = self {
-            for (sum, value) in sums.iter_mut().zip(Targets::values_of(values, *n_targets, sample)) {
-                *sum += sample.weight * value;
+        match self {
+            Targets::Values { values, n_targets, .. } => {
+                for (sum, value) in sums.iter_mut().zip(Targets::values_of(values, *n_targets, sample)) {
+                    *sum += sample.weight * value;
+                }
             }
+            Targets::SeveralClasses { channels, n_targets, .. } => {
+                for &channel in Targets::channels_of(channels, *n_targets, sample) {
+                    sums[channel as usize] += sample.weight;
+                }
+            }
+            Targets::Classes { .. } => {}
         }
     }
 
@@ -97,6 +155,9 @@ impl Targets {
             Targets::Classes { .. } | Targets::Values { n_targets: 1, .. } => a.target == b.target,
             Targets::Values { values, n_targets, .. } => {
                 Targets::values_of(values, *n_targets, a) == Targets::values_of(values, *n_targets, b)
+            }
+            Targets::SeveralClasses { channels, n_targets, .. } => {
+                Targets::channels_of(channels, *n_targets, a) == Targets::channels_of(channels, *n_targets, b)
             }
         }
     }
@@ -122,16 +183,17 @@ impl Targets {
             Targets::Values { n_targets: 1, .. } => {
                 sum_up(samples, n_channels, |sample, sums| sums[0] += sample.weight * sample.target)
             }
-            Targets::Values { .. } => sum_up(samples, n_channels, |sample, sums| self.add_to(sample, sums)),
+            _ => sum_up(samples, n_channels, |sample, sums| self.add_to(sample, sums)),
         }
     }
 
     /// What a leaf holding these samples predicts: class probabilities,
-    /// or the mean of each target in its original units.
-    pub fn leaf_prediction(&self, totals: &Totals) -> Vec<f64> {
-        let averages = totals.sums.iter().map(|sum| sum / totals.weight);
+    /// or the mean of each target in its original units (pulled towards
+    /// zero when `l2` is positive).
+    pub fn leaf_prediction(&self, totals: &Totals, l2: f64) -> Vec<f64> {
+        let averages = totals.sums.iter().map(|sum| sum / (totals.weight + l2));
         match self {
-            Targets::Classes { .. } => averages.collect(),
+            Targets::Classes { .. } | Targets::SeveralClasses { .. } => averages.collect(),
             Targets::Values { means, scales, .. } => {
                 averages.zip(means).zip(scales).map(|((average, mean), scale)| average * scale + mean).collect()
             }
@@ -168,9 +230,9 @@ impl Totals {
         Totals { count: 0.0, weight: 0.0, sums: vec![0.0; n_channels] }
     }
 
-    /// The quality score of this group: `sum_k (S_k)^2 / W`.
-    pub fn score(&self) -> f64 {
-        self.sums.iter().map(|sum| sum * sum).sum::<f64>() / self.weight
+    /// The quality score of this group: `sum_k (S_k)^2 / (W + l2)`.
+    pub fn score(&self, l2: f64) -> f64 {
+        self.sums.iter().map(|sum| sum * sum).sum::<f64>() / (self.weight + l2)
     }
 
     /// The totals of what is left after taking `part` out of this group.
@@ -224,7 +286,7 @@ impl Histogram {
             Targets::Values { n_targets: 1, .. } => {
                 self.accumulate(bins, samples, |sample, sums| sums[0] += sample.weight * sample.target)
             }
-            Targets::Values { .. } => self.accumulate(bins, samples, |sample, sums| targets.add_to(sample, sums)),
+            _ => self.accumulate(bins, samples, |sample, sums| targets.add_to(sample, sums)),
         }
     }
 
@@ -286,7 +348,7 @@ impl Histogram {
     /// Scan the bins left to right and return the best cut that leaves at
     /// least `min_samples_leaf` samples on each side and scores above
     /// `score_to_beat`.
-    pub fn best_cut(&self, parent: &Totals, min_samples_leaf: f64, score_to_beat: f64) -> Option<Cut> {
+    pub fn best_cut(&self, parent: &Totals, min_samples_leaf: f64, score_to_beat: f64, l2: f64) -> Option<Cut> {
         let mut best = None;
         let mut best_score = score_to_beat;
         let mut left = Totals::zero(parent.sums.len());
@@ -310,7 +372,7 @@ impl Histogram {
             }
             let right_squares: f64 =
                 parent.sums.iter().zip(&left.sums).map(|(all, left)| (all - left) * (all - left)).sum();
-            let score = left.score() + right_squares / right_weight;
+            let score = left.score(l2) + right_squares / (right_weight + l2);
             if score > best_score {
                 best_score = score;
                 best = Some(Cut { bin: bin as u8, score });

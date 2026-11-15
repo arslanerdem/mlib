@@ -19,13 +19,17 @@ pub(crate) struct TreeParams {
     /// How many randomly chosen features to try at each split.
     pub features_per_split: usize,
     pub bootstrap: bool,
+    /// The features the tree may split on, in increasing order.
+    pub features: Vec<usize>,
+    /// L2 regularisation (see `histogram.rs`); 0 for none.
+    pub l2: f64,
     /// Whether the tree may spread its own work over the cores. Turn it
     /// off when many trees are grown at the same time.
     pub parallel: bool,
 }
 
-/// Grow one tree. Returns the tree and each feature's importance (its
-/// share of the tree's total impurity reduction).
+/// Grow one tree. Returns the tree and each feature's gain: the total
+/// improvement in the quality score from the splits made on it.
 pub(crate) fn grow_tree(
     binned: &BinnedFeatures,
     targets: &Targets,
@@ -36,13 +40,8 @@ pub(crate) fn grow_tree(
     let mut builder = TreeBuilder::new(binned, targets, sample_weights, params, rng);
     builder.grow();
 
-    let mut importances = builder.importances;
-    let total: f64 = importances.iter().sum();
-    if total > 0.0 {
-        importances.iter_mut().for_each(|importance| *importance /= total);
-    }
     let tree = Tree { nodes: builder.nodes, leaf_values: builder.leaf_values, n_outputs: targets.n_channels() };
-    (tree, importances)
+    (tree, builder.importances)
 }
 
 /// A split must beat the unsplit node's score by more than rounding noise.
@@ -154,7 +153,7 @@ impl<'a> TreeBuilder<'a> {
             importances: vec![0.0; binned.n_features()],
             histogram: Histogram::new(targets.n_channels()),
             spare_histograms: Vec::new(),
-            feature_order: (0..binned.n_features()).collect(),
+            feature_order: params.features.clone(),
         }
     }
 
@@ -181,7 +180,7 @@ impl<'a> TreeBuilder<'a> {
             };
             let Some(split) = split else {
                 let leaf_number = self.leaf_values.len() / self.targets.n_channels();
-                self.leaf_values.extend(self.targets.leaf_prediction(&node.totals));
+                self.leaf_values.extend(self.targets.leaf_prediction(&node.totals, self.params.l2));
                 self.nodes[node.index] = TreeNode { threshold: 0.0, feature: LEAF, left_or_leaf: leaf_number as u32 };
                 if let Some(histograms) = node.histograms.take() {
                     self.recycle(histograms);
@@ -189,7 +188,7 @@ impl<'a> TreeBuilder<'a> {
                 continue;
             };
 
-            self.importances[split.feature] += split.score - node.totals.score();
+            self.importances[split.feature] += split.score - node.totals.score(self.params.l2);
             let middle = node.start + self.partition(&node, &split);
             // The two children sit next to each other: left, then right.
             let left = self.nodes.len();
@@ -279,7 +278,8 @@ impl<'a> TreeBuilder<'a> {
     /// are what is left after taking those out of the parent's. That at
     /// least halves the work of the most expensive step in growing a tree.
     fn child_histograms(&mut self, parent: Vec<Histogram>, left: &mut PendingNode, right: &mut PendingNode) {
-        let (smaller, larger) = if left.end - left.start <= right.end - right.start { (left, right) } else { (right, left) };
+        let (smaller, larger) =
+            if left.end - left.start <= right.end - right.start { (left, right) } else { (right, left) };
         let (smaller_keeps, larger_keeps) = (self.keeps_histograms(smaller), self.keeps_histograms(larger));
         if !larger_keeps {
             // The smaller child is then too small to keep any either.
@@ -328,9 +328,9 @@ impl<'a> TreeBuilder<'a> {
     /// The best split over every feature, read from histograms that are
     /// already filled.
     fn best_split_from_histograms(&mut self, node: &PendingNode, histograms: &[Histogram]) -> (Option<Split>, usize) {
-        let min_samples_leaf = self.params.min_samples_leaf as f64;
+        let (min_samples_leaf, l2) = (self.params.min_samples_leaf as f64, self.params.l2);
         let mut best: Option<Split> = None;
-        let mut score_to_beat = node.totals.score() * MIN_IMPROVEMENT;
+        let mut score_to_beat = node.totals.score(l2) * MIN_IMPROVEMENT;
         let mut n_constant = node.n_constant;
         for position in node.n_constant..self.feature_order.len() {
             let feature = self.feature_order[position];
@@ -338,7 +338,7 @@ impl<'a> TreeBuilder<'a> {
             if histogram.n_occupied_bins() == 1 {
                 self.feature_order.swap(position, n_constant);
                 n_constant += 1;
-            } else if let Some(cut) = histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat) {
+            } else if let Some(cut) = histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2) {
                 // On equal scores the first feature examined wins.
                 score_to_beat = cut.score;
                 best = Some(Split::new(feature, cut));
@@ -353,23 +353,24 @@ impl<'a> TreeBuilder<'a> {
     fn best_split_over_all_features(&mut self, node: &PendingNode) -> (Option<Split>, usize) {
         let samples = &self.samples[node.start..node.end];
         let (binned, targets) = (self.binned, self.targets);
-        let min_samples_leaf = self.params.min_samples_leaf as f64;
-        let score_to_beat = node.totals.score() * MIN_IMPROVEMENT;
+        let (min_samples_leaf, l2) = (self.params.min_samples_leaf as f64, self.params.l2);
+        let score_to_beat = node.totals.score(l2) * MIN_IMPROVEMENT;
 
         // `None`: the feature is constant here. Otherwise its best cut, if it has one.
         let examine = |histogram: &mut Histogram, feature: &usize| {
             histogram.fill(binned.bins(*feature), samples, targets);
             let varies = histogram.n_occupied_bins() > 1;
-            let found = varies.then(|| histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat));
+            let found = varies.then(|| histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2));
             histogram.clear();
             found
         };
         let candidates = &self.feature_order[node.n_constant..];
-        let examined: Vec<Option<Option<Cut>>> = if self.params.parallel && samples.len() * candidates.len() >= PARALLEL_WORK {
-            candidates.par_iter().map_init(|| Histogram::new(targets.n_channels()), examine).collect()
-        } else {
-            candidates.iter().map(|feature| examine(&mut self.histogram, feature)).collect()
-        };
+        let examined: Vec<Option<Option<Cut>>> =
+            if self.params.parallel && samples.len() * candidates.len() >= PARALLEL_WORK {
+                candidates.par_iter().map_init(|| Histogram::new(targets.n_channels()), examine).collect()
+            } else {
+                candidates.iter().map(|feature| examine(&mut self.histogram, feature)).collect()
+            };
 
         let mut best: Option<Split> = None;
         let mut n_constant = node.n_constant;
@@ -403,9 +404,9 @@ impl<'a> TreeBuilder<'a> {
     ///   0..n_constant   n_constant..end    end..
     /// ```
     fn best_split_over_random_features(&mut self, node: &PendingNode) -> (Option<Split>, usize) {
-        let min_samples_leaf = self.params.min_samples_leaf as f64;
+        let (min_samples_leaf, l2) = (self.params.min_samples_leaf as f64, self.params.l2);
         let mut best: Option<Split> = None;
-        let mut score_to_beat = node.totals.score() * MIN_IMPROVEMENT;
+        let mut score_to_beat = node.totals.score(l2) * MIN_IMPROVEMENT;
 
         let mut n_constant = node.n_constant;
         let mut end = self.feature_order.len();
@@ -432,7 +433,7 @@ impl<'a> TreeBuilder<'a> {
             } else {
                 end -= 1;
                 self.feature_order.swap(position, end);
-                if let Some(cut) = self.histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat) {
+                if let Some(cut) = self.histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2) {
                     score_to_beat = cut.score;
                     best = Some(Split::new(feature, cut));
                 }

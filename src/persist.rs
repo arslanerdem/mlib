@@ -29,9 +29,12 @@ use std::io::{BufWriter, Write};
 /// one. Raised only when a change cannot keep older files loading.
 pub const FORMAT_VERSION: u32 = 1;
 
+/// Everything a saved file holds, as [`load`] returns it.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SavedModel {
+    /// The layout the file was written in.
     pub format_version: u32,
+    /// The mlib release that wrote the file, such as "0.1.0".
     pub library_version: String,
     /// Which columns were x's, y's and roles.
     pub spec: ModelSpec,
@@ -59,6 +62,30 @@ struct VersionHeader {
 }
 
 /// Save a fitted pipeline to a JSON file.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let ages: Vec<f64> = (0..40).map(|row| 20.0 + row as f64).collect();
+/// let churned: Vec<i64> = (0..40).map(|row| (row >= 20) as i64).collect();
+/// let table = Table::new(vec![("age", Column::floats(&ages)), ("churned", Column::ints(&churned))])?;
+/// let spec = ModelSpec::new(&["age"], &["churned"]);
+/// let data = ModelData::new(&table, spec.clone())?;
+/// let forest = RandomForestSpec::default().n_trees(10).build()?;
+/// let fitted = Pipeline::new(vec![], Box::new(forest)).fit(&data)?;
+///
+/// let path = std::env::temp_dir().join("mlib-doc-example-model.json");
+/// let path = path.to_str().unwrap();
+/// save(&fitted, &spec, path)?;
+///
+/// // Later, perhaps in another program:
+/// let saved = load(path)?;
+/// assert_eq!(saved.spec, spec);
+/// assert_eq!(saved.format_version, mlib::FORMAT_VERSION);
+/// assert_eq!(saved.fitted.predict(&table)?, fitted.predict(&table)?);
+/// # std::fs::remove_file(path)?;
+/// # Ok::<(), Error>(())
+/// ```
 pub fn save(pipeline: &FittedPipeline, spec: &ModelSpec, path: &str) -> Result<()> {
     let saved = SavedModelRef {
         format_version: FORMAT_VERSION,
@@ -75,15 +102,23 @@ pub fn save(pipeline: &FittedPipeline, spec: &ModelSpec, path: &str) -> Result<(
 
 /// Load a saved pipeline. A file written by a newer layout than this
 /// release knows is rejected with `Error::UnsupportedVersion`.
+///
+/// ```no_run
+/// use mlib::prelude::*;
+///
+/// let saved = load("model.json")?;
+/// println!("saved by mlib {}; predicts {:?}", saved.library_version, saved.spec.y_columns);
+///
+/// let new_rows = Table::from_csv("new_rows.csv")?;
+/// let predictions = saved.fitted.predict(&new_rows)?;
+/// # Ok::<(), Error>(())
+/// ```
 pub fn load(path: &str) -> Result<SavedModel> {
     let bytes = std::fs::read(path)?;
     // Check the version first: a newer layout may not even parse as ours.
     let header: VersionHeader = serde_json::from_slice(&bytes)?;
     if header.format_version == 0 || header.format_version > FORMAT_VERSION {
-        return Err(Error::UnsupportedVersion {
-            version: header.format_version,
-            max_supported: FORMAT_VERSION,
-        });
+        return Err(Error::UnsupportedVersion { version: header.format_version, max_supported: FORMAT_VERSION });
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
