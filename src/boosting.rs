@@ -26,7 +26,7 @@
 //! The types follow the forest: [`GradientBoostingSpec`] → `build()` →
 //! [`ValidGradientBoostingSpec`] → `fit()` → [`FittedGradientBoosting`].
 
-use crate::classes;
+use crate::classes::{self, ClassWeight};
 use crate::encoded::{rank_importances, EncodedData, Feature};
 use crate::error::{Error, Result};
 use crate::random::Rng;
@@ -107,6 +107,10 @@ pub struct GradientBoostingSpec {
     /// Chooses the random rows for `subsample` and for the held-out set.
     /// Default 0. The same seed and data always give the same model.
     pub seed: u64,
+    /// Classification only: how much the rows of each class count.
+    /// Default `ClassWeight::None` (all the same).
+    #[serde(default)]
+    pub class_weight: ClassWeight,
 }
 
 /// The value of a fraction that leaves nothing out: what a spec saved
@@ -129,6 +133,7 @@ impl Default for GradientBoostingSpec {
             early_stopping_rounds: None,
             validation_fraction: 0.1,
             seed: 0,
+            class_weight: ClassWeight::None,
         }
     }
 }
@@ -214,9 +219,18 @@ impl GradientBoostingSpec {
         self
     }
 
+    /// How much the rows of each class count (classification only).
+    /// `ClassWeight::Balanced` makes a rare class count as much as a
+    /// common one.
+    pub fn class_weight(mut self, class_weight: ClassWeight) -> GradientBoostingSpec {
+        self.class_weight = class_weight;
+        self
+    }
+
     /// Validate the hyper-parameters. Only a validated spec can be fitted.
     pub fn build(&self) -> Result<ValidGradientBoostingSpec> {
         let invalid = |message: &str| Err(Error::InvalidSpec(message.to_string()));
+        self.class_weight.check(self.task)?;
         if self.n_rounds == 0 {
             return invalid("n_rounds must be at least 1");
         }
@@ -288,7 +302,7 @@ impl Estimator for ValidGradientBoostingSpec {
         let spec = &self.spec;
         tree::check_training_data(data)?;
         let n_rows = data.num_rows();
-        let sample_weights = data.weights.clone().unwrap_or_else(|| vec![1.0; n_rows]);
+        let sample_weights = classes::row_weights(&spec.class_weight, data)?.unwrap_or_else(|| vec![1.0; n_rows]);
 
         let Wanted { values: wanted, groups, classes, classes_per_target } = Wanted::new(spec.task, data)?;
 
@@ -419,7 +433,8 @@ impl Estimator for ValidGradientBoostingSpec {
     /// Parameters: `n_rounds`, `min_samples_leaf`, `seed` (Int);
     /// `learning_rate`, `subsample`, `feature_fraction`,
     /// `l2_regularization`, `validation_fraction` (Float);
-    /// `max_depth` and `early_stopping_rounds` (Int, or Text "none").
+    /// `max_depth` and `early_stopping_rounds` (Int, or Text "none");
+    /// `class_weight` (Text "none" / "balanced").
     fn set_param(&mut self, name: &str, value: &ParamValue) -> Result<()> {
         let invalid = || Error::InvalidSpec(format!("invalid value for {name}: {value:?}"));
         let as_count = || match value {
@@ -446,6 +461,7 @@ impl Estimator for ValidGradientBoostingSpec {
             "validation_fraction" => spec.validation_fraction = as_fraction()?,
             "max_depth" => spec.max_depth = as_optional_count()?,
             "early_stopping_rounds" => spec.early_stopping_rounds = as_optional_count()?,
+            "class_weight" => spec.class_weight = ClassWeight::from_param(value)?,
             _ => return Err(Error::InvalidSpec(format!("unknown parameter: {name}"))),
         }
         *self = spec.build()?;

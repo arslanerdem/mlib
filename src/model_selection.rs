@@ -232,6 +232,89 @@ impl GroupKFold {
     }
 }
 
+/// Time-series split: for data whose rows are in time order. Every fold
+/// trains on the rows before its test rows, never on later ones, so a
+/// model is always judged on a future it has not seen.
+///
+/// The last `n_splits` blocks of rows are the test sets, one per fold;
+/// each fold trains on everything before its block:
+///
+/// ```text
+/// fold 1:  train train test
+/// fold 2:  train train train test
+/// fold 3:  train train train train test
+/// ```
+///
+/// A test block holds `n_rows / (n_splits + 1)` rows unless
+/// `with_test_size` says otherwise. `splits` returns no folds if
+/// `n_splits` is below 2 or the rows do not suffice.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let folds = TimeSeriesSplit::new(3).splits(8);
+/// assert_eq!(folds[0], (vec![0, 1], vec![2, 3]));
+/// assert_eq!(folds[1], (vec![0, 1, 2, 3], vec![4, 5]));
+/// assert_eq!(folds[2], (vec![0, 1, 2, 3, 4, 5], vec![6, 7]));
+///
+/// // Leave a gap when the days just before a forecast are not yet known,
+/// // and cap the history to train on a moving window.
+/// let folds = TimeSeriesSplit::new(2).with_test_size(2).with_gap(1).with_max_train_size(3).splits(10);
+/// assert_eq!(folds[0], (vec![2, 3, 4], vec![6, 7]));
+/// assert_eq!(folds[1], (vec![4, 5, 6], vec![8, 9]));
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeSeriesSplit {
+    n_splits: usize,
+    test_size: Option<usize>,
+    gap: usize,
+    max_train_size: Option<usize>,
+}
+
+impl TimeSeriesSplit {
+    /// A time-series split with this many folds.
+    pub fn new(n_splits: usize) -> TimeSeriesSplit {
+        TimeSeriesSplit { n_splits, test_size: None, gap: 0, max_train_size: None }
+    }
+
+    /// How many rows each fold is tested on.
+    pub fn with_test_size(mut self, n_rows: usize) -> TimeSeriesSplit {
+        self.test_size = Some(n_rows);
+        self
+    }
+
+    /// Leave this many rows out between each fold's training rows and
+    /// its test rows.
+    pub fn with_gap(mut self, n_rows: usize) -> TimeSeriesSplit {
+        self.gap = n_rows;
+        self
+    }
+
+    /// Train each fold on at most this many rows, the latest ones.
+    pub fn with_max_train_size(mut self, n_rows: usize) -> TimeSeriesSplit {
+        self.max_train_size = Some(n_rows);
+        self
+    }
+
+    /// The folds for a dataset with this many rows, in time order.
+    pub fn splits(&self, n_rows: usize) -> Folds {
+        let test_size = self.test_size.unwrap_or(n_rows / (self.n_splits + 1));
+        // Every fold needs at least one training row before the gap.
+        let rows_needed = self.n_splits * test_size + self.gap;
+        if self.n_splits < 2 || test_size == 0 || self.max_train_size == Some(0) || rows_needed >= n_rows {
+            return Vec::new();
+        }
+        (0..self.n_splits)
+            .map(|fold| {
+                let test_start = n_rows - (self.n_splits - fold) * test_size;
+                let train_end = test_start - self.gap;
+                let train_start = self.max_train_size.map_or(0, |most| train_end.saturating_sub(most));
+                ((train_start..train_end).collect(), (test_start..test_start + test_size).collect())
+            })
+            .collect()
+    }
+}
+
 /// Scores from cross-validation. Loss metrics (rmse, mse, mae, log_loss)
 /// are negated, so higher is always better. See [`cross_validate`] for
 /// an example.
@@ -274,10 +357,24 @@ fn check_folds(folds: &[(Vec<usize>, Vec<usize>)], n_rows: usize) -> Result<()> 
 fn score_model(model: &dyn Predictor, test: &EncodedData, scorer: &dyn Scorer) -> Result<f64> {
     let score = if scorer.uses_probabilities() {
         let probabilities = model.predict_proba(test)?;
-        if probabilities.ncols() != 2 {
-            return Err(Error::InvalidSpec(format!("scorer '{}' needs exactly two classes", scorer.name())));
+        let classes = model.target_classes();
+        if classes.len() <= 1 {
+            // One target (or a model that does not name its classes).
+            let labels = classes.first().map_or(&[][..], Vec::as_slice);
+            scorer.score_probabilities(&test.target()?, &probabilities, labels)?
+        } else {
+            // Several targets: each has its own block of columns.
+            if test.y.ncols() != classes.len() {
+                return Err(Error::shape(format!("{} targets", classes.len()), format!("{}", test.y.ncols())));
+            }
+            let (mut total, mut start) = (0.0, 0);
+            for (target, labels) in classes.iter().enumerate() {
+                let block = probabilities.slice(ndarray::s![.., start..start + labels.len()]).to_owned();
+                total += scorer.score_probabilities(&test.y.column(target).to_vec(), &block, labels)?;
+                start += labels.len();
+            }
+            total / classes.len() as f64
         }
-        scorer.score(&test.target()?, &probabilities.column(1).to_vec())
     } else {
         let metric = |y_true: &[f64], y_pred: &[f64]| scorer.score(y_true, y_pred);
         metrics::mean_over_targets(metric, &test.y, &model.predict(test)?)?
@@ -399,7 +496,8 @@ pub type ParamGrid = HashMap<String, Vec<ParamValue>>;
 /// ```
 pub type Params = HashMap<String, ParamValue>;
 
-/// What a grid search found. See [`grid_search`] for an example.
+/// What a grid search or a random search found. See [`grid_search`] for
+/// an example.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct GridSearchResult {
@@ -431,10 +529,13 @@ fn combinations(grid: &ParamGrid) -> Vec<Params> {
     combos
 }
 
-/// Score every combination and keep the best (the first, on ties).
-fn search(grid: &ParamGrid, evaluate: impl Fn(&Params) -> Result<f64>) -> Result<GridSearchResult> {
+/// Score every candidate and keep the best (the first, on ties).
+fn search(candidates: Vec<Params>, evaluate: impl Fn(&Params) -> Result<f64>) -> Result<GridSearchResult> {
+    if candidates.is_empty() {
+        return Err(Error::InvalidSpec("nothing to search: a parameter has no candidate values".to_string()));
+    }
     let mut all_scores = Vec::new();
-    for params in combinations(grid) {
+    for params in candidates {
         let score = evaluate(&params)?;
         all_scores.push((params, score));
     }
@@ -478,7 +579,7 @@ pub fn grid_search<E: Estimator + Clone>(
     folds: &[(Vec<usize>, Vec<usize>)],
     scorer: &dyn Scorer,
 ) -> Result<GridSearchResult> {
-    search(param_grid, |params| {
+    search(combinations(param_grid), |params| {
         let mut candidate = spec.clone();
         for (name, value) in params {
             candidate.set_param(name, value)?;
@@ -520,7 +621,193 @@ pub fn grid_search_pipeline(
     folds: &[(Vec<usize>, Vec<usize>)],
     scorer: &dyn Scorer,
 ) -> Result<GridSearchResult> {
-    search(param_grid, |params| {
+    search(combinations(param_grid), |params| {
+        let mut candidate = pipe.clone();
+        for (name, value) in params {
+            candidate.set_param(name, value)?;
+        }
+        Ok(cross_validate_pipeline(&candidate, data, folds, scorer)?.mean)
+    })
+}
+
+/// Where a random search draws one parameter's values from.
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// let space = ParamDistributions::from([
+///     ("max_depth".to_string(), ParamDistribution::IntRange(2, 8)),
+///     ("subsample".to_string(), ParamDistribution::Uniform(0.5, 1.0)),
+///     // Rates of 0.01 and 0.1 are as far apart as 0.1 and 1: draw the scale evenly.
+///     ("learning_rate".to_string(), ParamDistribution::LogUniform(0.01, 1.0)),
+///     ("class_weight".to_string(), ParamDistribution::Choice(vec!["none".into(), "balanced".into()])),
+/// ]);
+/// assert_eq!(space.len(), 4);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ParamDistribution {
+    /// One of the listed values, each as likely as the others.
+    Choice(Vec<ParamValue>),
+    /// A whole number from the first to the second, both included.
+    IntRange(i64, i64),
+    /// A number between the two, every value as likely as any other.
+    Uniform(f64, f64),
+    /// A number between the two (both above 0) whose *logarithm* is
+    /// drawn evenly: as many draws fall between 0.001 and 0.01 as
+    /// between 0.1 and 1. For settings that work on a scale, such as a
+    /// learning rate or a regularisation strength.
+    LogUniform(f64, f64),
+}
+
+/// Parameter name → where its values are drawn from. Names work as in
+/// a [`ParamGrid`].
+pub type ParamDistributions = HashMap<String, ParamDistribution>;
+
+impl ParamDistribution {
+    /// Fail if no value can be drawn.
+    fn check(&self, name: &str) -> Result<()> {
+        let usable = match self {
+            ParamDistribution::Choice(values) => !values.is_empty(),
+            ParamDistribution::IntRange(low, high) => low <= high,
+            ParamDistribution::Uniform(low, high) => low.is_finite() && high.is_finite() && low <= high,
+            ParamDistribution::LogUniform(low, high) => *low > 0.0 && high.is_finite() && low <= high,
+        };
+        if usable {
+            Ok(())
+        } else {
+            Err(Error::InvalidSpec(format!("nothing can be drawn for '{name}' from {self:?}")))
+        }
+    }
+
+    /// Draw one value.
+    fn draw(&self, rng: &mut Rng) -> ParamValue {
+        // The top 53 bits make a uniform number in [0, 1).
+        let mut fraction = || (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+        match self {
+            ParamDistribution::Choice(values) => values[(fraction() * values.len() as f64) as usize].clone(),
+            ParamDistribution::IntRange(low, high) => {
+                let n_values = (*high as i128 - *low as i128 + 1) as f64;
+                ParamValue::Int((*low as i128 + (fraction() * n_values) as i128) as i64)
+            }
+            ParamDistribution::Uniform(low, high) => ParamValue::Float(low + fraction() * (high - low)),
+            ParamDistribution::LogUniform(low, high) => {
+                ParamValue::Float((low.ln() + fraction() * (high.ln() - low.ln())).exp())
+            }
+        }
+    }
+}
+
+/// `n_candidates` random choices of a value for every parameter. The
+/// same seed always gives the same candidates.
+fn random_candidates(distributions: &ParamDistributions, n_candidates: usize, seed: u64) -> Result<Vec<Params>> {
+    if n_candidates == 0 {
+        return Err(Error::InvalidSpec("a random search needs at least one candidate".to_string()));
+    }
+    // Sorted names: the draws must not depend on the map's own order.
+    let mut names: Vec<&String> = distributions.keys().collect();
+    names.sort();
+    for name in &names {
+        distributions[*name].check(name)?;
+    }
+    Ok((0..n_candidates)
+        .map(|candidate| {
+            let mut rng = Rng::new(seed, candidate as u64);
+            names.iter().map(|name| ((*name).clone(), distributions[*name].draw(&mut rng))).collect()
+        })
+        .collect())
+}
+
+/// Random search on already-encoded data: cross-validate `n_candidates`
+/// random parameter combinations and keep the best.
+///
+/// A grid grows quickly — five settings with four values each is 1,024
+/// fits per fold — and spends most of them on settings that hardly
+/// matter. A random search tries as many combinations as you can
+/// afford, and every one of them tries a new value of every setting.
+///
+/// If the data needs preprocessing, use [`random_search_pipeline`].
+///
+/// ```
+/// use mlib::ndarray::Array2;
+/// use mlib::prelude::*;
+///
+/// // The target follows a curve in the first feature.
+/// let x = Array2::from_shape_fn((300, 2), |(row, feature)| ((row * (feature + 3)) % 50) as f64);
+/// let y = Array2::from_shape_fn((300, 1), |(row, _)| (x[[row, 0]] / 8.0).sin());
+/// let data = EncodedData::new(x, y)?;
+///
+/// let model = GradientBoostingSpec::regressor().n_rounds(30).build()?;
+/// let space = ParamDistributions::from([
+///     ("max_depth".to_string(), ParamDistribution::IntRange(1, 6)),
+///     ("learning_rate".to_string(), ParamDistribution::LogUniform(0.01, 0.5)),
+/// ]);
+/// let folds = KFold::new(3).with_shuffle(42).splits(data.num_rows());
+/// let result = random_search(&model, &space, 8, 42, &data, &folds, &*scorer("r2")?)?;
+///
+/// assert_eq!(result.all_scores.len(), 8);
+/// assert!(result.best_score > 0.8);
+/// println!("best: {:?}", result.best_params);
+///
+/// // The same seed tries the same candidates again.
+/// let again = random_search(&model, &space, 8, 42, &data, &folds, &*scorer("r2")?)?;
+/// assert_eq!(result, again);
+/// # Ok::<(), Error>(())
+/// ```
+pub fn random_search<E: Estimator + Clone>(
+    spec: &E,
+    distributions: &ParamDistributions,
+    n_candidates: usize,
+    seed: u64,
+    data: &EncodedData,
+    folds: &[(Vec<usize>, Vec<usize>)],
+    scorer: &dyn Scorer,
+) -> Result<GridSearchResult> {
+    search(random_candidates(distributions, n_candidates, seed)?, |params| {
+        let mut candidate = spec.clone();
+        for (name, value) in params {
+            candidate.set_param(name, value)?;
+        }
+        Ok(cross_validate(&candidate, data, folds, scorer)?.mean)
+    })
+}
+
+/// Leakage-safe random search: every candidate is scored by
+/// [`cross_validate_pipeline`].
+///
+/// ```
+/// use mlib::prelude::*;
+///
+/// // 90 customers in time order; one in three churned, mostly the older ones.
+/// let ages: Vec<f64> = (0..90).map(|row| 20.0 + ((row * 37) % 60) as f64).collect();
+/// let churned: Vec<i64> = ages.iter().map(|&age| (age >= 60.0) as i64).collect();
+/// let table = Table::new(vec![("age", Column::floats(&ages)), ("churned", Column::ints(&churned))])?;
+/// let data = ModelData::new(&table, ModelSpec::new(&["age"], &["churned"]))?;
+///
+/// let pre = ColumnTransformer::empty().with_branch("num", StandardScaler::new(), &["age"]);
+/// let pipe = Pipeline::new(vec![Box::new(pre)], Box::new(RandomForestSpec::default().n_trees(10).build()?));
+///
+/// // `model__` reaches the model, as in a grid.
+/// let space = ParamDistributions::from([
+///     ("model__max_depth".to_string(), ParamDistribution::IntRange(1, 4)),
+///     ("model__class_weight".to_string(), ParamDistribution::Choice(vec!["none".into(), "balanced".into()])),
+/// ]);
+/// let folds = TimeSeriesSplit::new(3).splits(data.num_rows());
+/// let result = random_search_pipeline(&pipe, &space, 5, 1, &data, &folds, &*scorer("roc_auc")?)?;
+/// assert_eq!(result.all_scores.len(), 5);
+/// println!("best: {:?} with AUC {:.3}", result.best_params, result.best_score);
+/// # Ok::<(), Error>(())
+/// ```
+pub fn random_search_pipeline(
+    pipe: &Pipeline,
+    distributions: &ParamDistributions,
+    n_candidates: usize,
+    seed: u64,
+    data: &ModelData,
+    folds: &[(Vec<usize>, Vec<usize>)],
+    scorer: &dyn Scorer,
+) -> Result<GridSearchResult> {
+    search(random_candidates(distributions, n_candidates, seed)?, |params| {
         let mut candidate = pipe.clone();
         for (name, value) in params {
             candidate.set_param(name, value)?;

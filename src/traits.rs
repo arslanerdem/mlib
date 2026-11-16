@@ -386,4 +386,20 @@ pub trait Scorer {
     fn uses_probabilities(&self) -> bool {
         false
     }
+
+    /// Score one target's class probabilities: one row per sample, one
+    /// column per class, with `classes` the label each column stands
+    /// for. Cross-validation calls this when `uses_probabilities` is
+    /// true.
+    ///
+    /// As it stands it serves metrics for two classes: it hands the
+    /// second class's probability to `score`. Write your own for a
+    /// metric that reads the whole matrix.
+    fn score_probabilities(&self, y_true: &[f64], probabilities: &Array2<f64>, classes: &[Label]) -> Result<f64> {
+        let _ = classes;
+        if probabilities.ncols() != 2 {
+            return Err(Error::InvalidSpec(format!("scorer '{}' needs exactly two classes", self.name())));
+        }
+        Ok(self.score(y_true, &probabilities.column(1).to_vec()))
+    }
 }

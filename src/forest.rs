@@ -7,7 +7,7 @@
 //! [`ValidRandomForestSpec`] (checked) → `fit()` → [`FittedRandomForest`]
 //! (learned state only).
 
-use crate::classes::{self, TrainingClasses};
+use crate::classes::{self, ClassWeight, TrainingClasses};
 use crate::encoded::{rank_importances, EncodedData, Feature};
 use crate::error::{Error, Result};
 use crate::random::Rng;
@@ -95,6 +95,10 @@ pub struct RandomForestSpec {
     pub bootstrap: bool,
     /// Default 0. The same seed and data always give the same forest.
     pub seed: u64,
+    /// Classification only: how much the rows of each class count.
+    /// Default `ClassWeight::None` (all the same).
+    #[serde(default)]
+    pub class_weight: ClassWeight,
 }
 
 impl Default for RandomForestSpec {
@@ -107,6 +111,7 @@ impl Default for RandomForestSpec {
             min_samples_leaf: 1,
             bootstrap: true,
             seed: 0,
+            class_weight: ClassWeight::None,
         }
     }
 }
@@ -169,9 +174,18 @@ impl RandomForestSpec {
         self
     }
 
+    /// How much the rows of each class count (classification only).
+    /// `ClassWeight::Balanced` makes a rare class count as much as a
+    /// common one.
+    pub fn class_weight(mut self, class_weight: ClassWeight) -> RandomForestSpec {
+        self.class_weight = class_weight;
+        self
+    }
+
     /// Validate the hyper-parameters. Only a validated spec can be fitted.
     pub fn build(&self) -> Result<ValidRandomForestSpec> {
         let invalid = |message: &str| Err(Error::InvalidSpec(message.to_string()));
+        self.class_weight.check(self.task)?;
         if self.n_trees == 0 {
             return invalid("n_trees must be at least 1");
         }
@@ -229,6 +243,7 @@ impl Estimator for ValidRandomForestSpec {
     fn fit(&self, data: &EncodedData) -> Result<FittedRandomForest> {
         let spec = &self.spec;
         tree::check_training_data(data)?;
+        let weights = classes::row_weights(&spec.class_weight, data)?;
 
         let (targets, classes, classes_per_target) = match spec.task {
             Task::Classification => {
@@ -255,7 +270,7 @@ impl Estimator for ValidRandomForestSpec {
             .into_par_iter()
             .map(|t| {
                 let rng = Rng::new(spec.seed, t as u64);
-                let (tree, gains) = tree::grow_tree(&binned, &targets, data.weights.as_deref(), &params, rng);
+                let (tree, gains) = tree::grow_tree(&binned, &targets, weights.as_deref(), &params, rng);
                 (tree, tree::as_shares(gains))
             })
             .unzip();
@@ -274,7 +289,8 @@ impl Estimator for ValidRandomForestSpec {
 
     /// Parameters: `n_trees`, `min_samples_leaf`, `seed` (Int);
     /// `max_depth` (Int, or Text "none" for unlimited); `bootstrap` (Bool);
-    /// `max_features` (Text "all" / "sqrt" / "log2", or a Float fraction).
+    /// `max_features` (Text "all" / "sqrt" / "log2", or a Float fraction);
+    /// `class_weight` (Text "none" / "balanced").
     fn set_param(&mut self, name: &str, value: &ParamValue) -> Result<()> {
         let invalid = || Error::InvalidSpec(format!("invalid value for {name}: {value:?}"));
         let as_count = || match value {
@@ -305,6 +321,7 @@ impl Estimator for ValidRandomForestSpec {
                     _ => return Err(invalid()),
                 }
             }
+            "class_weight" => spec.class_weight = ClassWeight::from_param(value)?,
             _ => return Err(Error::InvalidSpec(format!("unknown parameter: {name}"))),
         }
         *self = spec.build()?;

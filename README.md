@@ -62,6 +62,29 @@ keeps compiling with every later 0.1.x, too.
 Every type and function in the [documentation](https://docs.rs/mlib)
 comes with an example that is run as a test.
 
+When one class is rare, make it count, and judge the model by how it
+ranks rows, not by accuracy:
+
+```rust
+let boosting = GradientBoostingSpec::default().class_weight(ClassWeight::Balanced).build()?;
+let pipe = Pipeline::new(vec![Box::new(pre)], Box::new(boosting));
+let folds = StratifiedKFold::new(5).with_shuffle(42).splits(&data.y()?, data.num_rows());
+let cv = cross_validate_pipeline(&pipe, &data, &folds, &*scorer("roc_auc")?)?;
+```
+
+Settings can be searched at random instead of on a grid, and data in
+time order has a split that never trains on the future:
+
+```rust
+let space = ParamDistributions::from([
+    ("model__max_depth".to_string(), ParamDistribution::IntRange(2, 8)),
+    ("model__learning_rate".to_string(), ParamDistribution::LogUniform(0.01, 0.3)),
+]);
+let folds = TimeSeriesSplit::new(5).splits(data.num_rows());
+let found = random_search_pipeline(&pipe, &space, 30, 42, &data, &folds, &*scorer("roc_auc")?)?;
+println!("best: {:?} ({:.3})", found.best_params, found.best_score);
+```
+
 Several numeric targets can be predicted together — name them all in the
 `ModelSpec`, and `predict` returns one column per target:
 
@@ -104,9 +127,9 @@ cargo test
 |---|---|
 | Data | `Table` (typed columns with nulls, CSV loading), `ModelSpec`, `ModelData`, `EncodedData` |
 | Preprocessing | `Imputer`, `CategoricalImputer`, `StandardScaler`, `OneHotEncoder`, `Chain`, `ColumnTransformer` |
-| Models | Random forest, gradient boosting and a linear model — classification and regression |
-| Evaluation | accuracy, F1, log loss, confusion matrix, MSE, RMSE, MAE, R² |
-| Model selection | train/test split, k-fold, stratified and grouped k-fold, cross-validation, grid search |
+| Models | Random forest, gradient boosting and a linear model — classification and regression, with class weights |
+| Evaluation | accuracy, balanced accuracy, precision, recall, F1 (also macro and weighted), ROC AUC, log loss, confusion matrix, MSE, RMSE, MAE, R² |
+| Model selection | train/test split, k-fold, stratified and grouped k-fold, time-series split, cross-validation, grid search, random search |
 | Persistence | `save` / `load` of a whole fitted pipeline as versioned JSON |
 
 ## Reading the code
@@ -126,14 +149,14 @@ src/
   linear.rs           the linear model: least squares and logistic regression
   minimise.rs         finding the lowest point of a function (used by logistic regression)
   scores.rs           from scores to predictions, shared by boosting and the linear model
-  classes.rs          class labels per target, and where they sit among the probabilities
+  classes.rs          class labels per target, where they sit among the probabilities, class weights
   tree/               what the two tree models share
     mod.rs            Tree, TreeNode, prediction
     binning.rs        features → at most 256 bins each
     histogram.rs      split finding (the hot loop)
     grow.rs           growing one tree
   metrics.rs          metric functions and the scorer registry
-  model_selection.rs  splits, cross-validation, grid search
+  model_selection.rs  splits, cross-validation, grid search, random search
   persist.rs          save / load
   random.rs           the seedable random number generator
   testing.rs          check_estimator and check_transformer, for your own algorithms

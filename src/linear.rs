@@ -20,7 +20,7 @@
 //! The types follow the other models: [`LinearModelSpec`] → `build()` →
 //! [`ValidLinearModelSpec`] → `fit()` → [`FittedLinearModel`].
 
-use crate::classes;
+use crate::classes::{self, ClassWeight};
 use crate::encoded::{EncodedData, Feature};
 use crate::error::{Error, Result};
 use crate::minimise::minimise;
@@ -64,11 +64,21 @@ pub struct LinearModelSpec {
     /// coefficient would change the average loss per row by less than
     /// this much per unit of change. Default 1e-5.
     pub tolerance: f64,
+    /// Classification only: how much the rows of each class count.
+    /// Default `ClassWeight::None` (all the same).
+    #[serde(default)]
+    pub class_weight: ClassWeight,
 }
 
 impl Default for LinearModelSpec {
     fn default() -> LinearModelSpec {
-        LinearModelSpec { task: Task::Classification, l2_regularization: 0.0, max_iterations: 200, tolerance: 1e-5 }
+        LinearModelSpec {
+            task: Task::Classification,
+            l2_regularization: 0.0,
+            max_iterations: 200,
+            tolerance: 1e-5,
+            class_weight: ClassWeight::None,
+        }
     }
 }
 
@@ -108,9 +118,18 @@ impl LinearModelSpec {
         self
     }
 
+    /// How much the rows of each class count (classification only).
+    /// `ClassWeight::Balanced` makes a rare class count as much as a
+    /// common one.
+    pub fn class_weight(mut self, class_weight: ClassWeight) -> LinearModelSpec {
+        self.class_weight = class_weight;
+        self
+    }
+
     /// Validate the hyper-parameters. Only a validated spec can be fitted.
     pub fn build(&self) -> Result<ValidLinearModelSpec> {
         let invalid = |message: &str| Err(Error::InvalidSpec(message.to_string()));
+        self.class_weight.check(self.task)?;
         if !(self.l2_regularization >= 0.0 && self.l2_regularization.is_finite()) {
             return invalid("l2_regularization must be 0 or more");
         }
@@ -164,9 +183,16 @@ impl Estimator for ValidLinearModelSpec {
     fn fit(&self, data: &EncodedData) -> Result<FittedLinearModel> {
         let spec = &self.spec;
         tree::check_training_data(data)?;
-        let weights = data.weights.clone().unwrap_or_else(|| vec![1.0; data.num_rows()]);
+        let weights = classes::row_weights(&spec.class_weight, data)?.unwrap_or_else(|| vec![1.0; data.num_rows()]);
         let Wanted { values: wanted, groups, classes, classes_per_target } = Wanted::new(spec.task, data)?;
-        let features = Standardised::new(&data.x, &weights);
+        // The features' scale describes the data, so it is measured with
+        // the sample weights alone; class weights say what a mistake
+        // costs, and only enter the fit. (This is also what scikit-learn
+        // does with a `StandardScaler` before a weighted model.)
+        let features = match &spec.class_weight {
+            ClassWeight::None => Standardised::new(&data.x, &weights),
+            _ => Standardised::new(&data.x, &data.weights.clone().unwrap_or_else(|| vec![1.0; data.num_rows()])),
+        };
 
         let fit = match spec.task {
             Task::Regression => least_squares(&features, &wanted, &weights, spec.l2_regularization),
@@ -203,7 +229,7 @@ impl Estimator for ValidLinearModelSpec {
     }
 
     /// Parameters: `l2_regularization`, `tolerance` (Float);
-    /// `max_iterations` (Int).
+    /// `max_iterations` (Int); `class_weight` (Text "none" / "balanced").
     fn set_param(&mut self, name: &str, value: &ParamValue) -> Result<()> {
         let invalid = || Error::InvalidSpec(format!("invalid value for {name}: {value:?}"));
         let mut spec = self.spec.clone();
@@ -211,6 +237,7 @@ impl Estimator for ValidLinearModelSpec {
             ("l2_regularization", ParamValue::Float(l2)) => spec.l2_regularization = *l2,
             ("tolerance", ParamValue::Float(tolerance)) => spec.tolerance = *tolerance,
             ("max_iterations", ParamValue::Int(n)) if *n >= 0 => spec.max_iterations = *n as usize,
+            ("class_weight", value) => spec.class_weight = ClassWeight::from_param(value)?,
             ("l2_regularization" | "tolerance" | "max_iterations", _) => return Err(invalid()),
             _ => return Err(Error::InvalidSpec(format!("unknown parameter: {name}"))),
         }

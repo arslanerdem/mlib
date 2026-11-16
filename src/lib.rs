@@ -73,18 +73,20 @@ mod tree;
 pub use ndarray;
 
 pub use boosting::{FittedGradientBoosting, GradientBoostingSpec, ValidGradientBoostingSpec};
+pub use classes::ClassWeight;
 pub use encoded::{EncodedData, Feature};
 pub use error::{Error, Result};
 pub use forest::{FittedRandomForest, MaxFeatures, RandomForestSpec, ValidRandomForestSpec};
 pub use linear::{FittedLinearModel, LinearModelSpec, ValidLinearModelSpec};
 pub use metrics::{
-    accuracy, confusion_matrix, f1_score, log_loss, mean_absolute_error, mean_squared_error, r2_score,
+    accuracy, balanced_accuracy_score, confusion_matrix, f1_macro, f1_score, f1_weighted, log_loss,
+    mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score,
     root_mean_squared_error, scorer,
 };
 pub use model_selection::{
-    cross_validate, cross_validate_pipeline, grid_search, grid_search_pipeline, train_test_split,
-    train_test_split_shuffled, CrossValidationResult, Folds, GridSearchResult, GroupKFold, KFold, ParamGrid, Params,
-    StratifiedKFold,
+    cross_validate, cross_validate_pipeline, grid_search, grid_search_pipeline, random_search, random_search_pipeline,
+    train_test_split, train_test_split_shuffled, CrossValidationResult, Folds, GridSearchResult, GroupKFold, KFold,
+    ParamDistribution, ParamDistributions, ParamGrid, Params, StratifiedKFold, TimeSeriesSplit,
 };
 pub use persist::{load, save, SavedModel, FORMAT_VERSION};
 pub use pipeline::{FittedPipeline, Pipeline};
@@ -104,15 +106,16 @@ pub use tree::{Node, Task, Tree};
 pub mod prelude {
     pub use crate::ndarray::Array2;
     pub use crate::{
-        accuracy, confusion_matrix, cross_validate, cross_validate_pipeline, f1_score, grid_search,
-        grid_search_pipeline, load, log_loss, mean_absolute_error, mean_squared_error, r2_score,
-        root_mean_squared_error, save, scorer, train_test_split, train_test_split_shuffled, AnyEstimator,
-        CategoricalFill, CategoricalImputer, Chain, Column, ColumnTransformer, CrossValidationResult, DataType,
-        EncodedData, Error, Estimator, Feature, FittedGradientBoosting, FittedLinearModel, FittedPipeline,
-        FittedRandomForest, Folds, GradientBoostingSpec, GridSearchResult, GroupKFold, HandleUnknown, ImputeStrategy,
-        Imputer, KFold, Label, LinearModelSpec, MaxFeatures, ModelData, ModelSpec, Node, OneHotEncoder, ParamGrid,
-        ParamValue, Params, Pipeline, Predictor, RandomForestSpec, Remainder, SavedModel, Scorer, StandardScaler,
-        StratifiedKFold, Table, Task, Transformer, Tree, ValidGradientBoostingSpec, ValidLinearModelSpec,
-        ValidRandomForestSpec,
+        accuracy, balanced_accuracy_score, confusion_matrix, cross_validate, cross_validate_pipeline, f1_macro,
+        f1_score, f1_weighted, grid_search, grid_search_pipeline, load, log_loss, mean_absolute_error,
+        mean_squared_error, precision_score, r2_score, random_search, random_search_pipeline, recall_score,
+        roc_auc_score, root_mean_squared_error, save, scorer, train_test_split, train_test_split_shuffled,
+        AnyEstimator, CategoricalFill, CategoricalImputer, Chain, ClassWeight, Column, ColumnTransformer,
+        CrossValidationResult, DataType, EncodedData, Error, Estimator, Feature, FittedGradientBoosting,
+        FittedLinearModel, FittedPipeline, FittedRandomForest, Folds, GradientBoostingSpec, GridSearchResult,
+        GroupKFold, HandleUnknown, ImputeStrategy, Imputer, KFold, Label, LinearModelSpec, MaxFeatures, ModelData,
+        ModelSpec, Node, OneHotEncoder, ParamDistribution, ParamDistributions, ParamGrid, ParamValue, Params, Pipeline,
+        Predictor, RandomForestSpec, Remainder, SavedModel, Scorer, StandardScaler, StratifiedKFold, Table, Task,
+        TimeSeriesSplit, Transformer, Tree, ValidGradientBoostingSpec, ValidLinearModelSpec, ValidRandomForestSpec,
     };
 }

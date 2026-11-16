@@ -4,6 +4,35 @@ What changed in each release, written for someone using the library.
 The record starts at 0.1.0; versions 0.0.1 to 0.0.3 were early
 snapshots published while the design settled.
 
+## 0.1.1 — 2026-11-15
+
+Additions only: code written against 0.1.0 compiles unchanged, files
+saved by 0.1.0 load and predict the same, and a model fitted with the
+settings of 0.1.0 comes out byte for byte the same.
+
+- **More metrics**: `precision_score`, `recall_score` and
+  `roc_auc_score` for two classes; `f1_macro`, `f1_weighted` and
+  `balanced_accuracy_score` for any number. All are scorers too:
+  "precision", "recall", "roc_auc", "f1_macro", "f1_weighted",
+  "balanced_accuracy", and "roc_auc_ovr" for more than two classes.
+- **Probability scorers work on any classifier.** "log_loss" (and the
+  two ROC scorers) used to need one target with classes labelled 0 and
+  1. They now take any number of classes, any labels and several
+  targets. Your own `Scorer` can do the same through the new
+  `score_probabilities` method; one written for 0.1.0 works as before.
+- **Class weights**: `.class_weight(ClassWeight::Balanced)` on any of
+  the three models makes a rare class count as much as a common one, as
+  in scikit-learn; `ClassWeight::PerClass` sets the weights yourself.
+- **`TimeSeriesSplit`**: folds for data in time order, where a model is
+  always tested on rows later than those it trained on. Optional gap,
+  test size and moving training window.
+- **Random search**: `random_search` and `random_search_pipeline` try a
+  chosen number of random settings instead of every combination of a
+  grid, drawing each from a list, a range or a log scale
+  (`ParamDistribution`).
+- A grid with a parameter that has no values is now an error, not a
+  panic.
+
 ## 0.1.0 — 2026-11-15
 
 The first release with promises. From here on:
