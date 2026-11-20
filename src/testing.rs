@@ -18,7 +18,10 @@ fn toy_data(n_rows: usize) -> EncodedData {
 /// Check that an estimator honours the library's behaviour contracts.
 /// Panics with a description of the first contract it breaks.
 ///
-/// - Junk data (no rows, no features, mismatched y, NaN) → `Err`, never a panic.
+/// - Junk data (no rows, no features, mismatched y) → `Err`, never a panic.
+/// - A missing value (NaN) in `x` → `Err`, unless the estimator says it
+///   [`accepts_missing`](Estimator::accepts_missing): then it must fit,
+///   and predict a number for a row that has one.
 /// - Fitting twice on the same data gives identical predictions.
 /// - Predictions come one per row; the wrong number of features → `Err`.
 ///
@@ -47,7 +50,14 @@ pub fn check_estimator<E: Estimator>(spec: &E) {
 
     let mut with_nan = data.clone();
     with_nan.x[[3, 0]] = f64::NAN;
-    assert!(spec.fit(&with_nan).is_err(), "fit must fail on NaN in x");
+    if spec.accepts_missing() {
+        let fitted = spec.fit(&with_nan).expect("fit must succeed with a missing value, as accepts_missing promises");
+        assert!(fitted.accepts_missing(), "a model fitted on missing values must predict for them too");
+        let predictions = fitted.predict(&with_nan).expect("predict must succeed with a missing value");
+        assert!(predictions.iter().all(|value| value.is_finite()), "a row with a missing value must get a prediction");
+    } else {
+        assert!(spec.fit(&with_nan).is_err(), "fit must fail on NaN in x");
+    }
 
     let first = spec.fit(&data).expect("fit must succeed on clean data");
     let second = spec.fit(&data).expect("fit must succeed a second time");

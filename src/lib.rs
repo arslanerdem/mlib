@@ -3,12 +3,36 @@
 //! Machine learning for tabular data, built to be fast and to read
 //! plainly. A study is a handful of steps:
 //!
-//! ```no_run
+//! ```
 //! use mlib::prelude::*;
 //!
 //! fn main() -> Result<(), Error> {
 //!     // 1. Load a table and say which columns play which role.
-//!     let table = Table::from_csv("data.csv")?;
+//!     // The data lives in the example, so it runs as written.
+//!     let csv = "\
+//! age,income,city,churned
+//! 34,52000,Oslo,0
+//! 45,88000,Rome,0
+//! 23,31000,Paris,1
+//! 52,95000,Oslo,0
+//! 29,42000,Rome,1
+//! 41,76000,Paris,0
+//! 36,,Oslo,0
+//! 27,38000,Paris,1
+//! 48,91000,Rome,0
+//! 31,47000,Oslo,1
+//! 55,102000,Paris,0
+//! 24,29000,Rome,1
+//! 39,68000,Oslo,0
+//! 43,81000,Paris,0
+//! 26,35000,Oslo,1
+//! 58,115000,Rome,0
+//! 33,54000,Paris,0
+//! ,61000,Oslo,0
+//! 28,40000,Rome,1
+//! 50,98000,Paris,0
+//! ";
+//!     let table = Table::from_csv_reader(csv.as_bytes())?;
 //!     let spec = ModelSpec::new(&["age", "income", "city"], &["churned"]);
 //!     let data = ModelData::new(&table, spec.clone())?;
 //!
@@ -25,7 +49,10 @@
 //!     println!("accuracy: {:.3} ± {:.3}", cv.mean, cv.std);
 //!
 //!     let fitted = pipe.fit(&data)?;
-//!     save(&fitted, &spec, "model.json")?;
+//!     // The test saves to a temp file so it leaves the checkout clean.
+//!     let path = std::env::temp_dir().join("mlib_quickstart_model.json");
+//!     let path = path.to_str().expect("temp path is valid UTF-8");
+//!     save(&fitted, &spec, path)?;
 //!     Ok(())
 //! }
 //! ```
@@ -42,7 +69,9 @@
 //! - Models train on [`EncodedData`]: a dense numeric matrix. There are
 //!   three: a random forest ([`RandomForestSpec`]), gradient boosting
 //!   ([`GradientBoostingSpec`]) and a linear model ([`LinearModelSpec`]),
-//!   the plain baseline. All do classification and regression.
+//!   the plain baseline. All do classification and regression. The two
+//!   tree models learn from missing values; the linear model needs them
+//!   filled in first.
 
 // Every public item carries a doc comment; CI fails on one without.
 #![warn(missing_docs)]

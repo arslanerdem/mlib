@@ -182,7 +182,7 @@ impl Estimator for ValidLinearModelSpec {
 
     fn fit(&self, data: &EncodedData) -> Result<FittedLinearModel> {
         let spec = &self.spec;
-        tree::check_training_data(data)?;
+        tree::check_training_data(data, false)?;
         let weights = classes::row_weights(&spec.class_weight, data)?.unwrap_or_else(|| vec![1.0; data.num_rows()]);
         let Wanted { values: wanted, groups, classes, classes_per_target } = Wanted::new(spec.task, data)?;
         // The features' scale describes the data, so it is measured with

@@ -1,6 +1,10 @@
 //! Time forest, boosting or linear-model training and prediction on synthetic data.
 //!
-//! cargo run --release --example benchmark [rows] [features] [trees] [forest|boosting|linear]
+//! cargo run --release --example benchmark [rows] [features] [trees] [forest|boosting|linear] [% missing]
+//!
+//! The last argument blanks out that share of the feature values, to
+//! time the tree models on data with missing values (the linear model
+//! does not take any).
 
 use mlib::prelude::*;
 use mlib::random::Rng;
@@ -9,7 +13,7 @@ use std::time::Instant;
 fn main() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let number = |position: usize, default: usize| -> usize {
-        args.get(position).map_or(default, |arg| arg.parse().expect("the first three arguments are numbers"))
+        args.get(position).map_or(default, |arg| arg.parse().expect("every argument but the fourth is a number"))
     };
     let (n_rows, n_features, n_trees) = (number(0, 100_000), number(1, 20), number(2, 100));
     let model_name = args.get(3).map_or("forest", |name| name.as_str());
@@ -20,6 +24,8 @@ fn main() -> Result<(), Error> {
     let x = Array2::from_shape_fn((n_rows, n_features), |_| uniform() + uniform() + uniform() - 1.5);
     let signal = |i: usize| x[[i, 0]] * x[[i, 1]] + x[[i, 2]].sin() + (x[[i, 3]] - x[[i, 4]]).abs() - 0.6;
     let y = Array2::from_shape_fn((n_rows, 1), |(i, _)| (signal(i) + 0.3 * (uniform() - 0.5) > 0.0) as u8 as f64);
+    let percent_missing = number(4, 0) as f64;
+    let x = x.mapv(|value| if uniform() * 100.0 < percent_missing { f64::NAN } else { value });
     let data = EncodedData::new(x, y)?;
 
     let n_train = n_rows * 4 / 5;

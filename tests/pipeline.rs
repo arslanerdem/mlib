@@ -76,9 +76,15 @@ fn unencoded_text_and_unfilled_nulls_are_reported_clearly() {
     let result = no_encoder.fit(&ModelData::new(&table, ModelSpec::new(&["sex"], &["survived"])).unwrap());
     assert!(matches!(result, Err(Error::TypeMismatch { .. })));
 
-    let no_imputer = Pipeline::new(vec![], forest());
-    let result = no_imputer.fit(&ModelData::new(&table, ModelSpec::new(&["age"], &["survived"])).unwrap());
-    assert!(matches!(result, Err(Error::InvalidData(_))));
+    // A linear model cannot use a missing value, and says what to do about it.
+    let linear = Box::new(LinearModelSpec::default().build().unwrap());
+    let ages = ModelData::new(&table, ModelSpec::new(&["age"], &["survived"])).unwrap();
+    let error = Pipeline::new(vec![], linear).fit(&ages).unwrap_err();
+    assert!(matches!(error, Error::InvalidData(_)));
+    assert!(error.to_string().contains("Imputer"), "{error}");
+
+    // The tree models learn from missing values, so they need no imputer.
+    assert!(Pipeline::new(vec![], forest()).fit(&ages).is_ok());
 }
 
 #[test]

@@ -249,6 +249,9 @@ impl Totals {
 pub struct Cut {
     /// Samples with bin code <= `bin` go left.
     pub bin: u8,
+    /// Whether the samples whose value is missing go left as well. They
+    /// sit in the feature's last bin, so otherwise they go right.
+    pub missing_left: bool,
     /// Score of the left group plus score of the right group.
     pub score: f64,
 }
@@ -348,13 +351,80 @@ impl Histogram {
     /// Scan the bins left to right and return the best cut that leaves at
     /// least `min_samples_leaf` samples on each side and scores above
     /// `score_to_beat`.
-    pub fn best_cut(&self, parent: &Totals, min_samples_leaf: f64, score_to_beat: f64, l2: f64) -> Option<Cut> {
-        let mut best = None;
-        let mut best_score = score_to_beat;
-        let mut left = Totals::zero(parent.sums.len());
-
+    ///
+    /// `missing_bin` is the feature's bin for missing values, if it has
+    /// one. Being the last bin, its samples are on the right of every
+    /// cut in the first scan. If the node holds any, a second scan tries
+    /// every cut again with them on the left, and the better of the two
+    /// wins (on equal scores, the first: missing to the right).
+    pub fn best_cut(
+        &self,
+        parent: &Totals,
+        min_samples_leaf: f64,
+        score_to_beat: f64,
+        l2: f64,
+        missing_bin: Option<u8>,
+    ) -> Option<Cut> {
+        let n_channels = parent.sums.len();
         // Cutting after the last occupied bin would leave the right side empty.
         let n_candidates = self.n_occupied_bins().saturating_sub(1);
+        let (mut best, score_to_beat) =
+            self.scan(parent, min_samples_leaf, score_to_beat, l2, Totals::zero(n_channels), n_candidates, false);
+
+        let node_has_missing = missing_bin.is_some_and(|bin| self.is_occupied(bin as usize));
+        if node_has_missing {
+            // Invariant: `node_has_missing` is only true for `Some` bin.
+            let missing_bin = missing_bin.unwrap();
+            // A cut after the node's last value bin has every value on
+            // the left and only the missing rows on the right. Say so by
+            // cutting after the feature's last value bin instead: for
+            // this node it is the same cut, and a row that arrives later
+            // with a larger value than the node has seen then goes with
+            // the values, not with the missing rows.
+            let last_value_bin = self.occupied_bins().nth(n_candidates.saturating_sub(1));
+            if let Some(cut) = best.as_mut().filter(|cut| Some(cut.bin as usize) == last_value_bin) {
+                cut.bin = missing_bin - 1;
+            }
+            let missing = self.cell_totals(missing_bin as usize);
+            // The missing bin is the last occupied one; the last value
+            // bin cannot be cut after either, with nothing left on the right.
+            let n_candidates = self.n_occupied_bins().saturating_sub(2);
+            let (with_missing_left, _) =
+                self.scan(parent, min_samples_leaf, score_to_beat, l2, missing, n_candidates, true);
+            best = with_missing_left.or(best);
+        }
+        best
+    }
+
+    /// Whether a bin holds at least one sample.
+    fn is_occupied(&self, bin: usize) -> bool {
+        self.occupied[bin / 64] & (1 << (bin % 64)) != 0
+    }
+
+    /// The totals of one bin.
+    fn cell_totals(&self, bin: usize) -> Totals {
+        let cell = &self.cells[bin * self.stride..][..self.stride];
+        Totals { count: cell[0], weight: cell[1], sums: cell[2..].to_vec() }
+    }
+
+    /// One left-to-right scan over the first `n_candidates` occupied
+    /// bins, with `left` holding what is on the left before the first
+    /// bin. Returns the best cut that beats `score_to_beat`, if any, and
+    /// the score the next scan has to beat.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn scan(
+        &self,
+        parent: &Totals,
+        min_samples_leaf: f64,
+        score_to_beat: f64,
+        l2: f64,
+        mut left: Totals,
+        n_candidates: usize,
+        missing_left: bool,
+    ) -> (Option<Cut>, f64) {
+        let mut best = None;
+        let mut best_score = score_to_beat;
         for bin in self.occupied_bins().take(n_candidates) {
             let cell = &self.cells[bin * self.stride..][..self.stride];
             left.count += cell[0];
@@ -375,10 +445,10 @@ impl Histogram {
             let score = left.score(l2) + right_squares / (right_weight + l2);
             if score > best_score {
                 best_score = score;
-                best = Some(Cut { bin: bin as u8, score });
+                best = Some(Cut { bin: bin as u8, missing_left, score });
             }
         }
-        best
+        (best, best_score)
     }
 
     /// Reset to empty, touching only the bins that were used.

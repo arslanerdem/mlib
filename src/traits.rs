@@ -173,6 +173,15 @@ pub trait Estimator {
     /// Set a hyper-parameter by name. Must re-validate: a value that makes
     /// the spec invalid, or an unknown name, is `Error::InvalidSpec`.
     fn set_param(&mut self, name: &str, value: &ParamValue) -> Result<()>;
+
+    /// Whether the model can learn from rows with missing values, which
+    /// arrive as `NaN` in `x`. A pipeline asks this: if true, missing
+    /// values left by the preprocessing are handed on as `NaN`; if false
+    /// (the default) they are an error that says to impute them. The
+    /// forest and gradient boosting say true.
+    fn accepts_missing(&self) -> bool {
+        false
+    }
 }
 
 /// A type-erased estimator: the form a `Pipeline` holds. Every `Clone`
@@ -194,6 +203,8 @@ pub trait AnyEstimator: sealed::Sealed {
     /// Like [`Estimator::set_param`]. It has its own name so that
     /// `spec.set_param(..)` always means the estimator's.
     fn set_param_boxed(&mut self, name: &str, value: &ParamValue) -> Result<()>;
+    /// Like [`Estimator::accepts_missing`].
+    fn accepts_missing_boxed(&self) -> bool;
     /// A copy of the estimator, behind a box.
     fn clone_box(&self) -> Box<dyn AnyEstimator>;
 }
@@ -215,6 +226,10 @@ where
 
     fn set_param_boxed(&mut self, name: &str, value: &ParamValue) -> Result<()> {
         self.set_param(name, value)
+    }
+
+    fn accepts_missing_boxed(&self) -> bool {
+        self.accepts_missing()
     }
 
     fn clone_box(&self) -> Box<dyn AnyEstimator> {
@@ -277,6 +292,13 @@ pub trait Predictor: Debug {
     /// model was fitted on. `None` for models that have no such notion.
     fn feature_importances(&self) -> Option<Vec<f64>> {
         None
+    }
+
+    /// Whether the model can predict for rows with missing values, which
+    /// arrive as `NaN` in `x`. A fitted pipeline asks this, as an
+    /// unfitted one asks [`Estimator::accepts_missing`].
+    fn accepts_missing(&self) -> bool {
+        false
     }
 }
 

@@ -300,7 +300,7 @@ impl Estimator for ValidGradientBoostingSpec {
 
     fn fit(&self, data: &EncodedData) -> Result<FittedGradientBoosting> {
         let spec = &self.spec;
-        tree::check_training_data(data)?;
+        tree::check_training_data(data, true)?;
         let n_rows = data.num_rows();
         let sample_weights = classes::row_weights(&spec.class_weight, data)?.unwrap_or_else(|| vec![1.0; n_rows]);
 
@@ -428,6 +428,11 @@ impl Estimator for ValidGradientBoostingSpec {
             n_features: data.num_features(),
             validation_losses,
         })
+    }
+
+    /// Trees learn which side of each split missing values belong on.
+    fn accepts_missing(&self) -> bool {
+        true
     }
 
     /// Parameters: `n_rounds`, `min_samples_leaf`, `seed` (Int);
@@ -717,6 +722,10 @@ impl Predictor for FittedGradientBoosting {
 
     fn feature_importances(&self) -> Option<Vec<f64>> {
         Some(self.feature_importances.clone())
+    }
+
+    fn accepts_missing(&self) -> bool {
+        true
     }
 
     fn target_classes(&self) -> Vec<Vec<Label>> {

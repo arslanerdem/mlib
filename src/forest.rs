@@ -242,7 +242,7 @@ impl Estimator for ValidRandomForestSpec {
 
     fn fit(&self, data: &EncodedData) -> Result<FittedRandomForest> {
         let spec = &self.spec;
-        tree::check_training_data(data)?;
+        tree::check_training_data(data, true)?;
         let weights = classes::row_weights(&spec.class_weight, data)?;
 
         let (targets, classes, classes_per_target) = match spec.task {
@@ -285,6 +285,11 @@ impl Estimator for ValidRandomForestSpec {
             features: data.features.clone(),
             n_features: data.num_features(),
         })
+    }
+
+    /// Trees learn which side of each split missing values belong on.
+    fn accepts_missing(&self) -> bool {
+        true
     }
 
     /// Parameters: `n_trees`, `min_samples_leaf`, `seed` (Int);
@@ -478,6 +483,10 @@ impl Predictor for FittedRandomForest {
 
     fn feature_importances(&self) -> Option<Vec<f64>> {
         Some(self.feature_importances.clone())
+    }
+
+    fn accepts_missing(&self) -> bool {
+        true
     }
 
     fn target_classes(&self) -> Vec<Vec<Label>> {

@@ -68,7 +68,14 @@ impl Pipeline {
         let encoded_table = steps.fit_transform(&input)?;
         let features = steps.output_columns(&data.input_features())?;
 
-        let encoded = EncodedData::from_table(&encoded_table, features.clone(), data.y_matrix()?, data.weights())?;
+        // A model that learns from missing values gets them as they are;
+        // for any other, a value still missing here is an error.
+        let into_matrix = if self.model.accepts_missing_boxed() {
+            EncodedData::from_table_with_missing
+        } else {
+            EncodedData::from_table
+        };
+        let encoded = into_matrix(&encoded_table, features.clone(), data.y_matrix()?, data.weights())?;
         let model = self.model.fit_boxed(&encoded)?;
         Ok(FittedPipeline { steps: steps.steps, model, schema: input.schema, features })
     }
@@ -195,7 +202,9 @@ impl FittedPipeline {
             encoded_table = step.transform(&encoded_table)?;
         }
         let no_targets = Array2::zeros((table.num_rows(), 0));
-        EncodedData::from_table(&encoded_table, self.features.clone(), no_targets, None)
+        let into_matrix =
+            if self.model.accepts_missing() { EncodedData::from_table_with_missing } else { EncodedData::from_table };
+        into_matrix(&encoded_table, self.features.clone(), no_targets, None)
     }
 
     /// Like `encode`, with the targets and weights the spec names.

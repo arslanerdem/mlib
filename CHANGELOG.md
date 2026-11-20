@@ -4,6 +4,32 @@ What changed in each release, written for someone using the library.
 The record starts at 0.1.0; versions 0.0.1 to 0.0.3 were early
 snapshots published while the design settled.
 
+## 0.1.2 — 2026-11-19
+
+- **The forest and gradient boosting learn from missing values.** No
+  imputing is needed: leave the missing values in, and every split
+  works out which side they belong on — or separates "has a value"
+  from "is missing" when that is what matters. On California housing
+  with holes in three columns, this scores higher than filling them
+  with the median (boosting R² 0.632 against 0.619), as it does in
+  scikit-learn.
+- **One behaviour changed.** A pipeline ending in a forest or boosting
+  that left a missing number unfilled used to stop with an error; it
+  now fits. Put an `Imputer` in if you want the old result. The linear
+  model still needs complete data and says so.
+- Nothing changes for complete data: the same model, byte for byte, at
+  the same speed. Saved models from 0.1.0 and 0.1.1 load and predict as
+  before.
+- New for your own code: `Tree::missing_goes_left` to read where a
+  split sends missing values; `Estimator::accepts_missing` (default
+  false) for a model of your own that handles them;
+  `EncodedData::from_table_with_missing`.
+- `check_estimator` no longer demands that a model reject a missing
+  value if the model says it accepts them.
+- The quick-start in the README and the crate documentation now builds
+  its table from data in the example itself, so it runs as written;
+  the crate-docs copy is run as a test.
+
 ## 0.1.1 — 2026-11-15
 
 Additions only: code written against 0.1.0 compiles unchanged, files

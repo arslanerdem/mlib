@@ -8,7 +8,7 @@
 
 use super::binning::BinnedFeatures;
 use super::histogram::{Cut, Histogram, Sample, Targets, Totals};
-use super::{Tree, TreeNode, LEAF};
+use super::{Tree, TreeNode};
 use crate::random::Rng;
 use rayon::prelude::*;
 
@@ -40,7 +40,7 @@ pub(crate) fn grow_tree(
     let mut builder = TreeBuilder::new(binned, targets, sample_weights, params, rng);
     builder.grow();
 
-    let tree = Tree { nodes: builder.nodes, leaf_values: builder.leaf_values, n_outputs: targets.n_channels() };
+    let tree = Tree::new(builder.nodes, builder.leaf_values, targets.n_channels());
     (tree, builder.importances)
 }
 
@@ -79,12 +79,14 @@ struct PendingNode {
 struct Split {
     feature: usize,
     bin: u8,
+    /// Whether samples whose value for the feature is missing go left.
+    missing_left: bool,
     score: f64,
 }
 
 impl Split {
     fn new(feature: usize, cut: Cut) -> Split {
-        Split { feature, bin: cut.bin, score: cut.score }
+        Split { feature, bin: cut.bin, missing_left: cut.missing_left, score: cut.score }
     }
 }
 
@@ -159,7 +161,7 @@ impl<'a> TreeBuilder<'a> {
 
     fn grow(&mut self) {
         // Every node is reserved as a placeholder and filled in when built.
-        let placeholder = TreeNode { threshold: 0.0, feature: LEAF, left_or_leaf: 0 };
+        let placeholder = TreeNode::leaf(0);
         self.nodes.push(placeholder.clone());
         let root = PendingNode {
             index: 0,
@@ -181,7 +183,7 @@ impl<'a> TreeBuilder<'a> {
             let Some(split) = split else {
                 let leaf_number = self.leaf_values.len() / self.targets.n_channels();
                 self.leaf_values.extend(self.targets.leaf_prediction(&node.totals, self.params.l2));
-                self.nodes[node.index] = TreeNode { threshold: 0.0, feature: LEAF, left_or_leaf: leaf_number as u32 };
+                self.nodes[node.index] = TreeNode::leaf(leaf_number);
                 if let Some(histograms) = node.histograms.take() {
                     self.recycle(histograms);
                 }
@@ -194,11 +196,8 @@ impl<'a> TreeBuilder<'a> {
             let left = self.nodes.len();
             self.nodes.push(placeholder.clone());
             self.nodes.push(placeholder.clone());
-            self.nodes[node.index] = TreeNode {
-                threshold: self.binned.threshold(split.feature, split.bin),
-                feature: split.feature as u32,
-                left_or_leaf: left as u32,
-            };
+            let threshold = self.binned.threshold(split.feature, split.bin);
+            self.nodes[node.index] = TreeNode::split(split.feature, threshold, left, split.missing_left);
             // Add up one side; the other is what remains of the node's totals.
             let left_totals = self.targets.totals(&self.samples[node.start..middle]);
             let right_totals = node.totals.without(&left_totals);
@@ -338,7 +337,9 @@ impl<'a> TreeBuilder<'a> {
             if histogram.n_occupied_bins() == 1 {
                 self.feature_order.swap(position, n_constant);
                 n_constant += 1;
-            } else if let Some(cut) = histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2) {
+            } else if let Some(cut) =
+                histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2, self.binned.missing_bin(feature))
+            {
                 // On equal scores the first feature examined wins.
                 score_to_beat = cut.score;
                 best = Some(Split::new(feature, cut));
@@ -360,7 +361,9 @@ impl<'a> TreeBuilder<'a> {
         let examine = |histogram: &mut Histogram, feature: &usize| {
             histogram.fill(binned.bins(*feature), samples, targets);
             let varies = histogram.n_occupied_bins() > 1;
-            let found = varies.then(|| histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2));
+            let missing_bin = binned.missing_bin(*feature);
+            let found =
+                varies.then(|| histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2, missing_bin));
             histogram.clear();
             found
         };
@@ -433,7 +436,10 @@ impl<'a> TreeBuilder<'a> {
             } else {
                 end -= 1;
                 self.feature_order.swap(position, end);
-                if let Some(cut) = self.histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2) {
+                let missing_bin = self.binned.missing_bin(feature);
+                if let Some(cut) =
+                    self.histogram.best_cut(&node.totals, min_samples_leaf, score_to_beat, l2, missing_bin)
+                {
                     score_to_beat = cut.score;
                     best = Some(Split::new(feature, cut));
                 }
@@ -452,7 +458,22 @@ impl<'a> TreeBuilder<'a> {
     /// every chunk has its own two stretches of `scratch` to write to.
     fn partition(&mut self, node: &PendingNode, split: &Split) -> usize {
         let bins = self.binned.bins(split.feature);
-        let goes_left = |sample: &Sample| bins[sample.row as usize] <= split.bin;
+        let cut = split.bin;
+        match self.binned.missing_bin(split.feature) {
+            // Missing values sit in the last bin, above the cut; this
+            // split wants them on the left all the same.
+            Some(missing_bin) if split.missing_left => self.partition_by(node, |sample| {
+                let bin = bins[sample.row as usize];
+                bin <= cut || bin == missing_bin
+            }),
+            _ => self.partition_by(node, |sample| bins[sample.row as usize] <= cut),
+        }
+    }
+
+    /// `partition`, with the test for "goes left" given, so that each
+    /// test gets its own copy of the loops.
+    #[inline(always)]
+    fn partition_by(&mut self, node: &PendingNode, goes_left: impl Fn(&Sample) -> bool + Sync) -> usize {
         // Copy a run of samples into the space reserved for each side.
         let move_apart = |samples: &[Sample], left: &mut [Sample], right: &mut [Sample]| {
             let (mut left, mut right) = (left.iter_mut(), right.iter_mut());

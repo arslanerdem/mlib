@@ -35,14 +35,27 @@ fn preprocessing() -> ColumnTransformer {
         )
 }
 
+/// The same without filling in the missing ages: for the tree models,
+/// which learn from them.
+fn preprocessing_that_leaves_holes() -> ColumnTransformer {
+    ColumnTransformer::empty().with_branch("num", StandardScaler::new(), &["age", "fare"]).with_branch(
+        "cat",
+        Chain::new(vec![Box::new(CategoricalImputer::constant("missing")), Box::new(OneHotEncoder::new())]),
+        &["pclass", "sex", "embarked"],
+    )
+}
+
 /// Small models that between them use every type that can be saved.
 fn fitted_pipelines(table: &Table) -> Vec<(&'static str, FittedPipeline, ModelSpec)> {
     let inputs = ["pclass", "sex", "age", "fare", "embarked"];
-    let fit = |model: Box<dyn AnyEstimator>, targets: &[&str]| {
+    let fit_after = |steps: ColumnTransformer, model: Box<dyn AnyEstimator>, targets: &[&str]| {
         let spec = ModelSpec::new(&inputs, targets);
-        let pipe = Pipeline::new(vec![Box::new(preprocessing())], model);
+        let pipe = Pipeline::new(vec![Box::new(steps)], model);
         (pipe.fit(&ModelData::new(table, spec.clone()).unwrap()).unwrap(), spec)
     };
+    let fit = |model: Box<dyn AnyEstimator>, targets: &[&str]| fit_after(preprocessing(), model, targets);
+    let fit_with_holes =
+        |model: Box<dyn AnyEstimator>, targets: &[&str]| fit_after(preprocessing_that_leaves_holes(), model, targets);
     let forest = RandomForestSpec::new().n_trees(5).max_depth(Some(4)).seed(1).build().unwrap();
     let forest_two_targets = RandomForestSpec::regressor().n_trees(5).max_depth(Some(4)).seed(1).build().unwrap();
     let boosting = GradientBoostingSpec::new().n_rounds(5).max_depth(Some(3)).build().unwrap();
@@ -55,6 +68,8 @@ fn fitted_pipelines(table: &Table) -> Vec<(&'static str, FittedPipeline, ModelSp
         .build()
         .unwrap();
     let boosting_two_class_targets = GradientBoostingSpec::new().n_rounds(5).max_depth(Some(3)).build().unwrap();
+    let boosting_with_holes =
+        GradientBoostingSpec::new().n_rounds(10).max_depth(Some(3)).min_samples_leaf(5).build().unwrap();
     let linear = LinearModelSpec::new().l2_regularization(1.0).build().unwrap();
     let linear_two_targets = LinearModelSpec::regressor().build().unwrap();
 
@@ -68,6 +83,8 @@ fn fitted_pipelines(table: &Table) -> Vec<(&'static str, FittedPipeline, ModelSp
         named("boosting_two_class_targets", fit(Box::new(boosting_two_class_targets), &["survived", "sibsp"])),
         named("linear_classifier", fit(Box::new(linear), &["survived"])),
         named("linear_two_targets", fit(Box::new(linear_two_targets), &["survived", "sibsp"])),
+        named("forest_missing_values", fit_with_holes(Box::new(forest.clone()), &["survived"])),
+        named("boosting_missing_values", fit_with_holes(Box::new(boosting_with_holes), &["survived"])),
     ]
 }
 

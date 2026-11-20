@@ -9,7 +9,31 @@ steps:
 use mlib::prelude::*;
 
 fn main() -> Result<(), Error> {
-    let table = Table::from_csv("data.csv")?;
+    // The data lives in the example, so it runs as written.
+    let csv = "\
+age,income,city,churned
+34,52000,Oslo,0
+45,88000,Rome,0
+23,31000,Paris,1
+52,95000,Oslo,0
+29,42000,Rome,1
+41,76000,Paris,0
+36,,Oslo,0
+27,38000,Paris,1
+48,91000,Rome,0
+31,47000,Oslo,1
+55,102000,Paris,0
+24,29000,Rome,1
+39,68000,Oslo,0
+43,81000,Paris,0
+26,35000,Oslo,1
+58,115000,Rome,0
+33,54000,Paris,0
+,61000,Oslo,0
+28,40000,Rome,1
+50,98000,Paris,0
+";
+    let table = Table::from_csv_reader(csv.as_bytes())?;
     let spec = ModelSpec::new(&["age", "income", "city"], &["churned"]);
     let data = ModelData::new(&table, spec.clone())?;
 
@@ -61,6 +85,17 @@ keeps compiling with every later 0.1.x, too.
 
 Every type and function in the [documentation](https://docs.rs/mlib)
 comes with an example that is run as a test.
+
+The forest and gradient boosting learn from missing values, so numbers
+need no imputing for them: leave the column out of the `Imputer` branch
+and pass it through.
+
+```rust
+let pre = ColumnTransformer::empty()
+    .with_branch("cat", OneHotEncoder::new(), &["city"])
+    .with_remainder(Remainder::Passthrough);        // age and income as they are, holes included
+let pipe = Pipeline::new(vec![Box::new(pre)], Box::new(GradientBoostingSpec::default().build()?));
+```
 
 When one class is rare, make it count, and judge the model by how it
 ranks rows, not by accuracy:
@@ -127,7 +162,7 @@ cargo test
 |---|---|
 | Data | `Table` (typed columns with nulls, CSV loading), `ModelSpec`, `ModelData`, `EncodedData` |
 | Preprocessing | `Imputer`, `CategoricalImputer`, `StandardScaler`, `OneHotEncoder`, `Chain`, `ColumnTransformer` |
-| Models | Random forest, gradient boosting and a linear model — classification and regression, with class weights |
+| Models | Random forest, gradient boosting and a linear model — classification and regression, with class weights; the two tree models learn from missing values |
 | Evaluation | accuracy, balanced accuracy, precision, recall, F1 (also macro and weighted), ROC AUC, log loss, confusion matrix, MSE, RMSE, MAE, R² |
 | Model selection | train/test split, k-fold, stratified and grouped k-fold, time-series split, cross-validation, grid search, random search |
 | Persistence | `save` / `load` of a whole fitted pipeline as versioned JSON |
@@ -152,7 +187,7 @@ src/
   classes.rs          class labels per target, where they sit among the probabilities, class weights
   tree/               what the two tree models share
     mod.rs            Tree, TreeNode, prediction
-    binning.rs        features → at most 256 bins each
+    binning.rs        features → at most 256 bins each, one of them for missing values
     histogram.rs      split finding (the hot loop)
     grow.rs           growing one tree
   metrics.rs          metric functions and the scorer registry

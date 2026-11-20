@@ -74,7 +74,8 @@ pub(crate) fn rank_importances(features: &[Feature], importances: &[f64]) -> Vec
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodedData {
-    /// (n_samples, n_features). Dense, no nulls.
+    /// (n_samples, n_features). Dense. A missing value is `NaN`, for the
+    /// models that accept them (see [`EncodedData::from_table_with_missing`]).
     pub x: Array2<f64>,
     /// (n_samples, n_targets). Zero columns when there are no targets
     /// (prediction time).
@@ -104,6 +105,47 @@ impl EncodedData {
         y: Array2<f64>,
         weights: Option<Vec<f64>>,
     ) -> Result<EncodedData> {
+        EncodedData::from_table_filling(table, features, y, weights, None)
+    }
+
+    /// Like [`EncodedData::from_table`], but a missing value becomes
+    /// `NaN` instead of an error. For models that learn from missing
+    /// values themselves — the forest and gradient boosting — so that no
+    /// imputing is needed first.
+    ///
+    /// ```
+    /// use mlib::ndarray::Array2;
+    /// use mlib::prelude::*;
+    ///
+    /// let table = Table::new(vec![("age", Column::Float(vec![Some(34.0), None]))])?;
+    /// let features = vec![Feature::numeric("age")];
+    /// let no_targets = Array2::zeros((2, 0));
+    ///
+    /// assert!(EncodedData::from_table(&table, features.clone(), no_targets.clone(), None).is_err());
+    /// let data = EncodedData::from_table_with_missing(&table, features, no_targets, None)?;
+    /// assert_eq!(data.x[[0, 0]], 34.0);
+    /// assert!(data.x[[1, 0]].is_nan());
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn from_table_with_missing(
+        table: &Table,
+        features: Vec<Feature>,
+        y: Array2<f64>,
+        weights: Option<Vec<f64>>,
+    ) -> Result<EncodedData> {
+        EncodedData::from_table_filling(table, features, y, weights, Some(f64::NAN))
+    }
+
+    /// The dense view of a table, with `for_missing` in place of every
+    /// missing value — or an error at the first one, if there is nothing
+    /// to put in its place.
+    fn from_table_filling(
+        table: &Table,
+        features: Vec<Feature>,
+        y: Array2<f64>,
+        weights: Option<Vec<f64>>,
+        for_missing: Option<f64>,
+    ) -> Result<EncodedData> {
         let expected: Vec<String> = features.iter().map(Feature::display_name).collect();
         if table.schema.names() != expected {
             return Err(Error::SchemaMismatch(format!(
@@ -123,7 +165,7 @@ impl EncodedData {
                 });
             }
             for i in 0..n_rows {
-                values[i * n_columns + j] = column.get_f64(i).ok_or_else(|| {
+                values[i * n_columns + j] = column.get_f64(i).or(for_missing).ok_or_else(|| {
                     Error::InvalidData(format!(
                         "column '{name}' has a missing value in row {i} — add an Imputer or drop the row"
                     ))
