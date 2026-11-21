@@ -205,11 +205,11 @@ are how many times faster mlib is; 1.0 means the same speed.
 
 | Dataset (train rows × features) | Forest fit | Forest predict | Boosting fit | Boosting predict |
 |---|---|---|---|---|
-| California housing (16,512 × 8) | 4.3× | 4.0× | 7.7× | 8.2× |
-| Friedman #1 (80,000 × 10) | 4.7× | 3.0× | 3.0× | 4.6× |
-| Synthetic (80,000 × 20) | 13.0× | 2.5× | 2.7× | 4.8× |
-| Covertype (464,809 × 54, 7 classes) | 2.8× | 1.6× | 1.6–2.2× | 5.0× |
-| Synthetic (800,000 × 20) | 13.6× | 2.3× | 1.0–1.7× | 2.9× |
+| California housing (16,512 × 8) | 3.7× | 4.5× | 4.8× | 6.4× |
+| Friedman #1 (80,000 × 10) | 5.0× | 3.0× | 2.0× | 4.9× |
+| Synthetic (80,000 × 20) | 10.4× | 2.0× | 2.0× | 4.6× |
+| Covertype (464,809 × 54, 7 classes) | 2.7× | 1.7× | 1.6–2.2× | 4.2× |
+| Synthetic (800,000 × 20) | 12.7× | 2.3× | 0.9–1.7× | 3.6× |
 
 Forest scores are within 0.003 of scikit-learn's and boosting scores
 within 0.001 or better. Boosting is compared with scikit-learn's
